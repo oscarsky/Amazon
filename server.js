@@ -88,11 +88,52 @@ async function fetchAmazon(productUrl) {
 }
 
 /**
- * 解析所有主图大图
+ * 解析所有主图大图（高清原图）
  */
 function parseImages($) {
   const seen = [];
   const seenIds = new Set();
+
+  // 从 landingImage 的 data-a-dynamic-image 提取最大尺寸图
+  const li = $('#landingImage');
+  if (li.length) {
+    const dyn = li.attr('data-a-dynamic-image');
+    if (dyn) {
+      try {
+        const map = JSON.parse(dyn);
+        const urls = Object.keys(map);
+        // 找最大尺寸的图
+        let bestUrl = '', bestSize = 0;
+        for (const u of urls) {
+          const dims = map[u];
+          const size = (dims[0] || 0) * (dims[1] || 0);
+          if (size > bestSize) { bestSize = size; bestUrl = u; }
+        }
+        if (bestUrl) {
+          const m = bestUrl.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+          const bid = m ? m[1] : bestUrl;
+          if (!seenIds.has(bid)) {
+            seenIds.add(bid);
+            seen.push(bestUrl);
+          }
+        }
+      } catch (e) { /* ignore */ }
+    }
+    // data-old-hires 作为兜底
+    if (seen.length === 0) {
+      const oh = li.attr('data-old-hires');
+      if (oh) {
+        const m = oh.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+        const bid = m ? m[1] : oh;
+        if (!seenIds.has(bid)) {
+          seenIds.add(bid);
+          seen.push(oh);
+        }
+      }
+    }
+  }
+
+  // 从 altImages 缩略图提取，转成最大尺寸 SL2000
   $('#altImages img').each((_, el) => {
     const src = $(el).attr('src') || '';
     const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
@@ -100,22 +141,11 @@ function parseImages($) {
       const bid = m[1];
       if (!seenIds.has(bid)) {
         seenIds.add(bid);
-        seen.push(`https://m.media-amazon.com/images/I/${bid}._SL1500_.jpg`);
+        seen.push(`https://m.media-amazon.com/images/I/${bid}._SL2000_.jpg`);
       }
     }
   });
-  const li = $('#landingImage');
-  if (li.length) {
-    const oh = li.attr('data-old-hires');
-    if (oh) {
-      const m = oh.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-      const bid = m ? m[1] : oh;
-      if (!seenIds.has(bid)) {
-        seenIds.add(bid);
-        seen.unshift(oh);
-      }
-    }
-  }
+
   return seen;
 }
 
@@ -192,15 +222,70 @@ function parseSelectedVariant($) {
   const selImgs = $('.a-button-selected img').toArray();
   for (const el of selImgs) {
     const alt = cleanText($(el).attr('alt') || '');
-    if (alt) return t2s(alt);
+    if (alt) return translateVariant(alt);
   }
   // aria-pressed=true
   const pressed = $('[aria-pressed="true"] img').toArray();
   for (const el of pressed) {
     const alt = cleanText($(el).attr('alt') || '');
-    if (alt) return t2s(alt);
+    if (alt) return translateVariant(alt);
   }
   return null;
+}
+
+/**
+ * 将变体名称翻译为中文
+ */
+function translateVariant(name) {
+  if (!name) return name;
+  let s = name;
+  // 常见包装词汇翻译
+  const rules = [
+    [/\bCombo Pack\b/gi, '组合装'],
+    [/\bVariety Pack\b/gi, '混合装'],
+    [/\bPack of (\d+)\b/gi, '$1瓶装'],
+    [/\b(\d+) Pack\b/gi, '$1瓶装'],
+    [/\bPack\b/gi, '瓶装'],
+    [/\bSingle\b/gi, '1瓶'],
+    [/\bRefill\b/gi, '补充装'],
+    [/\bCount\b/gi, '件'],
+    [/\bCt\b/gi, '件'],
+    [/\bOunce\b/gi, '盎司'],
+    [/\bOunces\b/gi, '盎司'],
+    [/(\d+)\s*oz\b/gi, '$1盎司'],
+    [/\boz\b/gi, '盎司'],
+    [/(\d+)\s*fl\s*oz\b/gi, '$1液量盎司'],
+    [/\bml\b/gi, '毫升'],
+    [/\bmL\b/gi, '毫升'],
+    [/\bBottle\b/gi, '瓶'],
+    [/\bBottles\b/gi, '瓶'],
+    [/\bJar\b/gi, '罐'],
+    [/\bJars\b/gi, '罐'],
+    [/\bBag\b/gi, '袋'],
+    [/\bBags\b/gi, '袋'],
+    [/\bBox\b/gi, '盒'],
+    [/\bBoxes\b/gi, '盒'],
+    [/\bCan\b/gi, '罐'],
+    [/\bCans\b/gi, '罐'],
+    [/\bTube\b/gi, '支'],
+    [/\bTubes\b/gi, '支'],
+    [/\bBar\b/gi, '条'],
+    [/\bBars\b/gi, '条'],
+    [/\bTablet\b/gi, '片'],
+    [/\bTablets\b/gi, '片'],
+    [/\bCapsule\b/gi, '粒'],
+    [/\bCapsules\b/gi, '粒'],
+  ];
+  for (const [re, rep] of rules) {
+    s = s.replace(re, rep);
+  }
+  // "1 瓶装" -> "1瓶装" 等空格清理
+  s = s.replace(/(\d+)\s+(瓶|罐|袋|盒|支|条|片|粒|件|盎司|毫升)/g, '$1$2');
+  // 清理多余空格
+  s = s.replace(/\s+/g, ' ').trim();
+  // 繁体转简体
+  s = t2s(s);
+  return s;
 }
 
 /**
@@ -209,21 +294,38 @@ function parseSelectedVariant($) {
 function parseVariants($) {
   const variants = [];
   const seen = new Set();
-  // swatch 变体图片
-  $('.swatch-image-wrapper img, [class*="swatch"] img, .inline-twister-image img').each((_, el) => {
-    const alt = cleanText($(el).attr('alt') || '');
-    const src = $(el).attr('src') || '';
-    if (!alt || !src || !src.includes('/images/I/')) return;
-    const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-    if (!m) return;
-    const bid = m[1];
-    if (seen.has(bid)) return;
-    seen.add(bid);
-    variants.push({
-      name: t2s(alt),
-      image: `https://m.media-amazon.com/images/I/${bid}._SL1500_.jpg`,
+
+  // 收集所有可能的变体图片：swatch、inline-twister、twister、a-button-toggle
+  const selectors = [
+    '.swatch-image-wrapper img',
+    '[class*="swatch"] img',
+    '.inline-twister-image img',
+    '#twister img',
+    '.a-button-toggle img',
+    '.a-button-thumbnail img',
+    '.image-swatch-button img',
+    '[data-defaultasin] img',
+  ];
+
+  for (const sel of selectors) {
+    $(sel).each((_, el) => {
+      const alt = cleanText($(el).attr('alt') || '');
+      const src = $(el).attr('src') || '';
+      if (!alt || !src || !src.includes('/images/I/')) return;
+      // 排除主图区域和视频缩略图
+      if (src.includes('SY50') || src.includes('US40')) return;
+      const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+      if (!m) return;
+      const bid = m[1];
+      if (seen.has(bid)) return;
+      seen.add(bid);
+      variants.push({
+        name: translateVariant(alt),
+        image: `https://m.media-amazon.com/images/I/${bid}._SL1500_.jpg`,
+      });
     });
-  });
+  }
+
   return variants;
 }
 
@@ -530,12 +632,61 @@ let progressTimer = null;
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1800);}
 
 async function copyText(text,btn){
+  if(!text){return;}
   let ok=false;
-  try{if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);ok=true;}}catch(e){}
-  if(!ok){try{const ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();ok=document.execCommand('copy');document.body.removeChild(ta);}catch(e){}}
-  if(ok){if(btn){btn.classList.add('copied');btn.textContent='✓ 已复制';setTimeout(()=>{btn.classList.remove('copied');btn.innerHTML='📋 复制';},1500);}else toast('已复制');}
-  else toast('复制失败，请手动复制');
+  // 优先 clipboard API
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(text);
+      ok=true;
+    }
+  }catch(e){}
+  // fallback: textarea + execCommand
+  if(!ok){
+    try{
+      const ta=document.createElement('textarea');
+      ta.value=text;
+      ta.style.cssText='position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:none;opacity:0;';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      ok=document.execCommand('copy');
+      document.body.removeChild(ta);
+    }catch(e){}
+  }
+  // 再次 fallback: ClipboardItem
+  if(!ok && window.ClipboardItem && navigator.clipboard){
+    try{
+      await navigator.clipboard.write([new ClipboardItem({'text/plain': new Blob([text], {type:'text/plain'})})]);
+      ok=true;
+    }catch(e){}
+  }
+  if(ok){
+    if(btn){btn.classList.add('copied');btn.textContent='✓ 已复制';setTimeout(()=>{btn.classList.remove('copied');btn.innerHTML='📋 复制';},1500);}
+    else toast('已复制');
+  }else{
+    // 最后兜底：弹出输入框让用户手动复制
+    try{
+      const ta=document.createElement('textarea');
+      ta.value=text;
+      ta.style.cssText='position:fixed;top:50%;left:50%;width:300px;height:100px;z-index:9999;padding:10px;';
+      document.body.appendChild(ta);
+      ta.select();
+      toast('请手动复制（已选中）');
+      setTimeout(()=>{if(ta.parentNode)ta.parentNode.removeChild(ta);},3000);
+    }catch(e){toast('复制失败，请手动复制');}
+  }
 }
+
+// 全局事件委托：处理所有 .copy-btn 点击
+document.addEventListener('click', function(e){
+  const btn = e.target.closest('.copy-btn');
+  if(btn && btn.dataset.text !== undefined){
+    e.preventDefault();
+    copyText(btn.dataset.text, btn);
+  }
+});
 
 function escapeHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
@@ -544,7 +695,8 @@ function setField(id, value){
   const el = document.getElementById(id);
   if(!value){ el.textContent = '未采集到'; el.classList.add('placeholder'); return; }
   el.classList.remove('placeholder');
-  el.innerHTML = escapeHtml(value) + '<button class="copy-btn" onclick="copyText(' + JSON.stringify(String(value)) + ', this)">📋 复制</button>';
+  const safe = escapeHtml(value);
+  el.innerHTML = safe + '<button class="copy-btn" data-text="' + safe.replace(/"/g,'&quot;') + '">📋 复制</button>';
 }
 
 // 启动进度条
@@ -639,7 +791,8 @@ function renderResult(d){
   if(d.bullets && d.bullets.length){
     bulletsEl.classList.remove('placeholder');
     const allText = d.bullets.join('\\n');
-    let html = '<li style="margin-bottom:10px"><button class="copy-btn" onclick="copyText(' + JSON.stringify(allText) + ', this)">📋 复制全部</button></li>';
+    const safeAll = escapeHtml(allText).replace(/"/g,'&quot;');
+    let html = '<li style="margin-bottom:10px"><button class="copy-btn" data-text="' + safeAll + '">📋 复制全部</button></li>';
     d.bullets.forEach(b=>{ html += '<li>' + escapeHtml(b) + '</li>'; });
     bulletsEl.innerHTML = html;
   } else {
@@ -682,9 +835,10 @@ function renderResult(d){
     d.variants.forEach((v,i)=>{
       const dl = '/api/proxy_image?url=' + encodeURIComponent(v.image);
       const safeName = escapeHtml(v.name);
+      const dataText = safeName.replace(/"/g,'&quot;');
       html += '<div class="sku-item">';
       html += '<a class="sku-img" href="'+dl+'" download><img src="'+v.image+'" alt="'+safeName+'" loading="lazy" onerror="this.style.opacity=.3"><div class="dl-overlay"><span>⬇ 下载</span></div></a>';
-      html += '<div class="sku-name">'+safeName+'<button class="copy-btn" onclick="copyText('+JSON.stringify(v.name)+', this)">📋 复制</button></div>';
+      html += '<div class="sku-name">'+safeName+'<button class="copy-btn" data-text="'+dataText+'">📋 复制</button></div>';
       html += '</div>';
     });
     skuEl.innerHTML = html;
