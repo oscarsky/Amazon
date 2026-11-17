@@ -177,7 +177,54 @@ function parseBrand($) {
 }
 
 function parseSku($) {
+  // 优先返回当前选中的变体名称（如"1瓶（4盎司）"）
+  const selected = parseSelectedVariant($);
+  if (selected) return selected;
+  // 否则返回项目型号
   return parseDetailRow($, ['項目型號', '项目型号', 'Item model number', 'SKU', '庫存單位']);
+}
+
+/**
+ * 解析当前选中的变体名称
+ */
+function parseSelectedVariant($) {
+  // 遍历所有 a-button-selected 内的图片，找第一个有 alt 的
+  const selImgs = $('.a-button-selected img').toArray();
+  for (const el of selImgs) {
+    const alt = cleanText($(el).attr('alt') || '');
+    if (alt) return t2s(alt);
+  }
+  // aria-pressed=true
+  const pressed = $('[aria-pressed="true"] img').toArray();
+  for (const el of pressed) {
+    const alt = cleanText($(el).attr('alt') || '');
+    if (alt) return t2s(alt);
+  }
+  return null;
+}
+
+/**
+ * 解析所有SKU变体（名称 + 图片）
+ */
+function parseVariants($) {
+  const variants = [];
+  const seen = new Set();
+  // swatch 变体图片
+  $('.swatch-image-wrapper img, [class*="swatch"] img, .inline-twister-image img').each((_, el) => {
+    const alt = cleanText($(el).attr('alt') || '');
+    const src = $(el).attr('src') || '';
+    if (!alt || !src || !src.includes('/images/I/')) return;
+    const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+    if (!m) return;
+    const bid = m[1];
+    if (seen.has(bid)) return;
+    seen.add(bid);
+    variants.push({
+      name: t2s(alt),
+      image: `https://m.media-amazon.com/images/I/${bid}._SL1500_.jpg`,
+    });
+  });
+  return variants;
 }
 
 /**
@@ -203,8 +250,9 @@ async function scrape(productUrl) {
   const video = parseVideo(html);
   const brand = parseBrand($);
   const sku = parseSku($);
+  const variants = parseVariants($);
 
-  return { title, price, bullets, images, video, brand, sku, url: productUrl };
+  return { title, price, bullets, images, video, brand, sku, variants, url: productUrl };
 }
 
 // ==================== 路由 ====================
@@ -386,6 +434,16 @@ const INDEX_HTML = `<!DOCTYPE html>
   .dl-overlay span { color: #fff; font-size: 13px; font-weight: 600; }
   .video-card { display: flex; align-items: center; gap: 16px; padding: 14px; background: #f7f8fa; border-radius: 8px; margin-top: 16px; }
   .video-card.placeholder { color: #bbb; font-style: italic; justify-content: center; }
+  .sku-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 14px; }
+  .sku-grid.placeholder { color: #bbb; font-style: italic; display: flex; align-items: center; justify-content: center; min-height: 60px; }
+  .sku-item { display: flex; flex-direction: column; gap: 8px; }
+  .sku-item .sku-img { position: relative; border-radius: 8px; overflow: hidden; background: #f7f7f7; aspect-ratio: 1; cursor: pointer; transition: transform .15s; }
+  .sku-item .sku-img:hover { transform: translateY(-2px); }
+  .sku-item .sku-img img { width: 100%; height: 100%; object-fit: contain; }
+  .sku-item .sku-img .dl-overlay { position: absolute; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity .15s; }
+  .sku-item .sku-img:hover .dl-overlay { opacity: 1; }
+  .sku-item .sku-name { font-size: 13px; color: #444; text-align: center; word-break: break-word; line-height: 1.4; }
+  .sku-item .sku-name .copy-btn { display: block; width: 100%; margin-top: 4px; }
   .video-thumb { width: 120px; height: 68px; background: #000; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 11px; flex-shrink: 0; overflow: hidden; }
   .video-thumb video { width: 100%; height: 100%; object-fit: cover; }
   .video-info { flex: 1; }
@@ -454,6 +512,12 @@ const INDEX_HTML = `<!DOCTYPE html>
     </div>
     <div class="media-grid placeholder" id="fImages">等待采集...</div>
     <div class="video-card placeholder" id="fVideo">暂无视频</div>
+  </div>
+
+  <!-- 其他SKU图片 -->
+  <div class="card">
+    <div class="field-label">其他SKU图片 <span style="font-weight:normal;color:#aaa;font-size:12px">（每个SKU图片可单独下载，下方文字可复制）</span></div>
+    <div class="sku-grid placeholder" id="fSkuImages">等待采集...</div>
   </div>
 </div>
 
@@ -541,6 +605,8 @@ async function doScrape(){
   document.getElementById('fImages').textContent='采集中...';
   document.getElementById('fVideo').textContent='采集中...';
   document.getElementById('fVideo').classList.add('placeholder');
+  document.getElementById('fSkuImages').textContent='采集中...';
+  document.getElementById('fSkuImages').classList.add('placeholder');
   document.getElementById('dlAllBtn').style.display='none';
 
   try{
@@ -607,14 +673,67 @@ function renderResult(d){
     vidEl.textContent = '暂无视频';
     vidEl.classList.add('placeholder');
   }
+
+  // 其他SKU图片
+  const skuEl = document.getElementById('fSkuImages');
+  if(d.variants && d.variants.length){
+    skuEl.classList.remove('placeholder');
+    let html = '';
+    d.variants.forEach((v,i)=>{
+      const dl = '/api/proxy_image?url=' + encodeURIComponent(v.image);
+      const safeName = escapeHtml(v.name);
+      html += '<div class="sku-item">';
+      html += '<a class="sku-img" href="'+dl+'" download><img src="'+v.image+'" alt="'+safeName+'" loading="lazy" onerror="this.style.opacity=.3"><div class="dl-overlay"><span>⬇ 下载</span></div></a>';
+      html += '<div class="sku-name">'+safeName+'<button class="copy-btn" onclick="copyText('+JSON.stringify(v.name)+', this)">📋 复制</button></div>';
+      html += '</div>';
+    });
+    skuEl.innerHTML = html;
+  } else {
+    skuEl.textContent = '该商品无其他SKU变体';
+    skuEl.classList.add('placeholder');
+  }
 }
 
-// 一键下载全部图片（逐个原图下载，不打包）
+// 一键下载全部图片（使用 File System Access API，选择一次目录保存所有图片）
 async function downloadAllImages(){
   if(!currentImages.length){ toast('没有可下载的图片'); return; }
   const btn = document.getElementById('dlAllBtn');
   btn.disabled = true;
   const origText = btn.innerHTML;
+
+  // 优先使用 File System Access API（用户选择一次目录，所有图片直接写入）
+  if(window.showDirectoryPicker){
+    try{
+      const dirHandle = await window.showDirectoryPicker();
+      let success = 0;
+      for(let i = 0; i < currentImages.length; i++){
+        btn.innerHTML = '<span class="spinner"></span> 保存中 ' + (i+1) + '/' + currentImages.length;
+        try{
+          const src = currentImages[i];
+          const dlUrl = '/api/proxy_image?url=' + encodeURIComponent(src);
+          const resp = await fetch(dlUrl);
+          if(!resp.ok) continue;
+          const blob = await resp.blob();
+          const ext = (src.match(/\\.(jpg|jpeg|png|webp)/i) || ['jpg'])[1];
+          const fileName = 'image_' + String(i+1).padStart(2,'0') + '.' + ext;
+          const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          success++;
+        }catch(e){}
+      }
+      btn.disabled = false;
+      btn.innerHTML = origText;
+      toast('已保存 ' + success + ' 张图片到所选文件夹');
+      return;
+    }catch(e){
+      // 用户取消选择目录或其他错误，回退到逐个下载
+      if(e.name === 'AbortError'){ btn.disabled=false; btn.innerHTML=origText; return; }
+    }
+  }
+
+  // 回退方案：逐个下载（浏览器会保存到默认下载目录）
   let success = 0;
   for(let i = 0; i < currentImages.length; i++){
     btn.innerHTML = '<span class="spinner"></span> 下载中 ' + (i+1) + '/' + currentImages.length;
@@ -634,7 +753,6 @@ async function downloadAllImages(){
       setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
       success++;
     }catch(e){}
-    // 间隔避免浏览器拦截多文件下载
     await new Promise(r=>setTimeout(r, 400));
   }
   btn.disabled = false;
