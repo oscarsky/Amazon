@@ -341,32 +341,43 @@ const INDEX_HTML = `<!DOCTYPE html>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #f0f2f5; color: #1a1a1a; line-height: 1.6; }
   .container { max-width: 1100px; margin: 0 auto; padding: 24px 16px; }
-  header { text-align: center; margin-bottom: 28px; }
+  header { text-align: center; margin-bottom: 24px; }
   header h1 { font-size: 26px; color: #232f3e; margin-bottom: 6px; }
   header p { color: #666; font-size: 14px; }
-  .search-box { display: flex; gap: 10px; margin-bottom: 24px; }
+  .search-box { display: flex; gap: 10px; margin-bottom: 16px; }
   .search-box input { flex: 1; padding: 12px 16px; border: 1px solid #d0d0d0; border-radius: 8px; font-size: 15px; outline: none; transition: border .2s; }
   .search-box input:focus { border-color: #ff9900; box-shadow: 0 0 0 3px rgba(255,153,0,.15); }
   .search-box button { padding: 12px 28px; background: #ff9900; color: #fff; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; transition: background .2s; white-space: nowrap; }
   .search-box button:hover { background: #e88a00; }
   .search-box button:disabled { background: #ccc; cursor: not-allowed; }
+
+  /* 进度条 */
+  .progress-wrap { display: none; background: #fff; border-radius: 12px; padding: 16px 20px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  .progress-wrap.active { display: block; }
+  .progress-bar { width: 100%; height: 8px; background: #eee; border-radius: 4px; overflow: hidden; margin-bottom: 8px; }
+  .progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #ff9900, #ff6b00); border-radius: 4px; transition: width .3s ease; }
+  .progress-text { font-size: 13px; color: #666; }
+
   .card { background: #fff; border-radius: 12px; padding: 24px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-  .field { margin-bottom: 18px; }
+  .field { margin-bottom: 16px; }
   .field:last-child { margin-bottom: 0; }
   .field-label { font-size: 13px; color: #888; margin-bottom: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
-  .field-value { font-size: 16px; color: #222; word-break: break-word; }
-  .copy-btn { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; padding: 3px 10px; font-size: 12px; background: #eef2f7; color: #444; border: none; border-radius: 5px; cursor: pointer; transition: background .15s; }
+  .field-value { font-size: 16px; color: #222; word-break: break-word; min-height: 24px; }
+  .field-value.placeholder { color: #bbb; font-style: italic; font-size: 14px; }
+  .copy-btn { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; padding: 3px 10px; font-size: 12px; background: #eef2f7; color: #444; border: none; border-radius: 5px; cursor: pointer; transition: background .15s; vertical-align: middle; }
   .copy-btn:hover { background: #dfe6ef; }
   .copy-btn.copied { background: #28a745; color: #fff; }
   .bullets { padding-left: 4px; }
   .bullets li { margin-bottom: 8px; padding-left: 20px; position: relative; list-style: none; }
   .bullets li::before { content: "•"; position: absolute; left: 0; color: #ff9900; font-weight: bold; }
+  .bullets.placeholder { color: #bbb; font-style: italic; }
   .media-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
   .media-header .field-label { margin-bottom: 0; }
   .download-all-btn { padding: 8px 18px; background: #232f3e; color: #fff; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background .15s; display: inline-flex; align-items: center; gap: 6px; }
   .download-all-btn:hover { background: #37475a; }
   .download-all-btn:disabled { background: #ccc; cursor: not-allowed; }
-  .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 14px; }
+  .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 14px; min-height: 80px; }
+  .media-grid.placeholder { color: #bbb; font-style: italic; display: flex; align-items: center; justify-content: center; }
   .media-item { position: relative; border-radius: 8px; overflow: hidden; background: #f7f7f7; aspect-ratio: 1; cursor: pointer; transition: transform .15s; }
   .media-item:hover { transform: translateY(-2px); }
   .media-item img { width: 100%; height: 100%; object-fit: contain; }
@@ -374,6 +385,7 @@ const INDEX_HTML = `<!DOCTYPE html>
   .media-item:hover .dl-overlay { opacity: 1; }
   .dl-overlay span { color: #fff; font-size: 13px; font-weight: 600; }
   .video-card { display: flex; align-items: center; gap: 16px; padding: 14px; background: #f7f8fa; border-radius: 8px; margin-top: 16px; }
+  .video-card.placeholder { color: #bbb; font-style: italic; justify-content: center; }
   .video-thumb { width: 120px; height: 68px; background: #000; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 11px; flex-shrink: 0; overflow: hidden; }
   .video-thumb video { width: 100%; height: 100%; object-fit: cover; }
   .video-info { flex: 1; }
@@ -383,9 +395,7 @@ const INDEX_HTML = `<!DOCTYPE html>
   .btn-primary { background: #ff9900; color: #fff; }
   .btn-primary:hover { background: #e88a00; }
   .btn-primary:disabled { background: #ccc; }
-  .empty { text-align: center; padding: 60px 20px; color: #aaa; }
-  .empty .icon { font-size: 48px; margin-bottom: 12px; }
-  .spinner { display: inline-block; width: 18px; height: 18px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; }
+  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 10px 22px; border-radius: 20px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 999; }
   .toast.show { opacity: 1; }
@@ -398,16 +408,63 @@ const INDEX_HTML = `<!DOCTYPE html>
     <h1>📦 亚马逊商品信息采集工具</h1>
     <p>粘贴商品链接，一键采集主图、视频、标题、SKU、价格、品牌与商品介绍</p>
   </header>
+
   <div class="search-box">
     <input id="urlInput" type="text" placeholder="请输入亚马逊商品链接，例如 https://www.amazon.com/dp/xxxx" value="https://www.amazon.com/dp/B0F1TFC28B">
     <button id="scrapeBtn" onclick="doScrape()">开始采集</button>
   </div>
-  <div id="result"></div>
+
+  <!-- 进度条 -->
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="progress-text" id="progressText">准备中...</div>
+  </div>
+
+  <!-- 基本信息 -->
+  <div class="card">
+    <div class="field">
+      <div class="field-label">商品标题</div>
+      <div class="field-value placeholder" id="fTitle">等待采集...</div>
+    </div>
+    <div class="field">
+      <div class="field-label">品牌名称</div>
+      <div class="field-value placeholder" id="fBrand">等待采集...</div>
+    </div>
+    <div class="field">
+      <div class="field-label">SKU</div>
+      <div class="field-value placeholder" id="fSku">等待采集...</div>
+    </div>
+    <div class="field">
+      <div class="field-label">价格</div>
+      <div class="field-value placeholder" id="fPrice">等待采集...</div>
+    </div>
+  </div>
+
+  <!-- 关于此商品 -->
+  <div class="card">
+    <div class="field-label">关于此商品</div>
+    <ul class="bullets placeholder" id="fBullets">等待采集...</ul>
+  </div>
+
+  <!-- 媒体 -->
+  <div class="card">
+    <div class="media-header">
+      <div class="field-label">商品主图 / 视频</div>
+      <button class="download-all-btn" id="dlAllBtn" onclick="downloadAllImages()" style="display:none">⬇ 一键下载全部图片</button>
+    </div>
+    <div class="media-grid placeholder" id="fImages">等待采集...</div>
+    <div class="video-card placeholder" id="fVideo">暂无视频</div>
+  </div>
 </div>
+
 <div class="toast" id="toast"></div>
+
 <script>
 let currentImages = [];
+let progressTimer = null;
+
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1800);}
+
 async function copyText(text,btn){
   let ok=false;
   try{if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);ok=true;}}catch(e){}
@@ -415,91 +472,194 @@ async function copyText(text,btn){
   if(ok){if(btn){btn.classList.add('copied');btn.textContent='✓ 已复制';setTimeout(()=>{btn.classList.remove('copied');btn.innerHTML='📋 复制';},1500);}else toast('已复制');}
   else toast('复制失败，请手动复制');
 }
-function fieldHtml(label,value){
-  if(!value)return '';
-  const safe=String(value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  return '<div class="field"><div class="field-label">'+label+'</div><div class="field-value">'+safe+'<button class="copy-btn" onclick=\'copyText('+JSON.stringify(String(value))+', this)\'>📋 复制</button></div></div>';
+
+function escapeHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+// 设置字段值（带复制按钮）
+function setField(id, value){
+  const el = document.getElementById(id);
+  if(!value){ el.textContent = '未采集到'; el.classList.add('placeholder'); return; }
+  el.classList.remove('placeholder');
+  el.innerHTML = escapeHtml(value) + '<button class="copy-btn" onclick="copyText(' + JSON.stringify(String(value)) + ', this)">📋 复制</button>';
 }
+
+// 启动进度条
+function startProgress(){
+  const wrap = document.getElementById('progressWrap');
+  const fill = document.getElementById('progressFill');
+  const txt = document.getElementById('progressText');
+  wrap.classList.add('active');
+  let p = 0;
+  fill.style.width = '0%';
+  const stages = [
+    {max:15, text:'正在连接亚马逊服务器...'},
+    {max:45, text:'正在抓取商品页面...'},
+    {max:80, text:'正在解析商品数据...'},
+    {max:99, text:'正在整理结果...'},
+  ];
+  progressTimer = setInterval(()=>{
+    p += 1.2;
+    if(p > 99) p = 99;
+    fill.style.width = p + '%';
+    for(const s of stages){ if(p < s.max){ txt.textContent = s.text; break; } }
+  }, 120);
+}
+
+function finishProgress(){
+  if(progressTimer){ clearInterval(progressTimer); progressTimer = null; }
+  const fill = document.getElementById('progressFill');
+  const txt = document.getElementById('progressText');
+  fill.style.width = '100%';
+  txt.textContent = '采集完成';
+  setTimeout(()=>{ document.getElementById('progressWrap').classList.remove('active'); }, 800);
+}
+
+function failProgress(msg){
+  if(progressTimer){ clearInterval(progressTimer); progressTimer = null; }
+  const fill = document.getElementById('progressFill');
+  const txt = document.getElementById('progressText');
+  fill.style.width = '100%';
+  fill.style.background = '#c53030';
+  txt.textContent = '采集失败: ' + msg;
+}
+
 async function doScrape(){
-  const url=document.getElementById('urlInput').value.trim();
-  if(!url){toast('请输入链接');return;}
-  const btn=document.getElementById('scrapeBtn');
-  const result=document.getElementById('result');
-  btn.disabled=true;btn.innerHTML='<span class="spinner"></span> 采集中...';result.innerHTML='';
+  const url = document.getElementById('urlInput').value.trim();
+  if(!url){ toast('请输入链接'); return; }
+  const btn = document.getElementById('scrapeBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 采集中...';
+  // 重置进度条颜色
+  document.getElementById('progressFill').style.background = 'linear-gradient(90deg, #ff9900, #ff6b00)';
+  startProgress();
+  // 把字段置为"采集中"状态
+  ['fTitle','fBrand','fSku','fPrice'].forEach(id=>{
+    const el=document.getElementById(id);
+    el.textContent='采集中...'; el.classList.add('placeholder');
+  });
+  document.getElementById('fBullets').textContent='采集中...';
+  document.getElementById('fImages').textContent='采集中...';
+  document.getElementById('fVideo').textContent='采集中...';
+  document.getElementById('fVideo').classList.add('placeholder');
+  document.getElementById('dlAllBtn').style.display='none';
+
   try{
-    const resp=await fetch('/api/scrape',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
-    const json=await resp.json();
-    if(!resp.ok||!json.ok){result.innerHTML='<div class="error-msg">❌ '+(json.error||'采集失败')+'</div>';return;}
-    renderResult(json.data);
-  }catch(e){result.innerHTML='<div class="error-msg">❌ 网络错误: '+e.message+'</div>';}
-  finally{btn.disabled=false;btn.textContent='开始采集';}
-}
-function renderResult(d){
-  currentImages=d.images||[];
-  const result=document.getElementById('result');
-  let html='';
-  html+='<div class="card">';
-  html+=fieldHtml('商品标题',d.title);
-  if(d.brand)html+=fieldHtml('品牌名称',d.brand);
-  if(d.sku)html+=fieldHtml('SKU',d.sku);
-  if(d.price)html+=fieldHtml('价格',d.price);
-  html+='</div>';
-  if(d.bullets&&d.bullets.length){
-    const allText=d.bullets.join('\\n');
-    html+='<div class="card"><div class="field-label">关于此商品 <button class="copy-btn" onclick=\'copyText('+JSON.stringify(allText)+', this)\'>📋 复制全部</button></div><ul class="bullets">';
-    d.bullets.forEach(b=>{html+='<li>'+b.replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</li>';});
-    html+='</ul></div>';
-  }
-  if((d.images&&d.images.length)||d.video){
-    html+='<div class="card"><div class="media-header"><div class="field-label">商品主图 ('+(d.images?d.images.length:0)+' 张) / 视频</div>';
-    if(d.images&&d.images.length>1)html+='<button class="download-all-btn" id="dlAllBtn" onclick="downloadAllImages()">⬇ 一键下载全部图片</button>';
-    html+='</div><div class="media-grid">';
-    if(d.images){d.images.forEach((src,i)=>{
-      const dl='/api/proxy_image?url='+encodeURIComponent(src);
-      html+='<a class="media-item" href="'+dl+'" download><img src="'+src+'" alt="主图'+(i+1)+'" loading="lazy" onerror="this.style.opacity=.3"><div class="dl-overlay"><span>⬇ 下载</span></div></a>';
-    });}
-    html+='</div>';
-    if(d.video){
-      html+='<div class="video-card"><div class="video-thumb"><video src="'+d.video.master+'" muted playsinline preload="metadata"></video></div><div class="video-info"><div class="vtitle">主图视频</div><div class="vmeta">点击下方按钮下载为 MP4 文件</div></div><button class="btn btn-primary" onclick="downloadVideo(\\''+d.video.stream720+'\\', this)">⬇ 下载视频</button></div>';
+    const resp = await fetch('/api/scrape',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+    const json = await resp.json();
+    if(!resp.ok || !json.ok){
+      failProgress(json.error || '采集失败');
+      return;
     }
-    html+='</div>';
+    renderResult(json.data);
+    finishProgress();
+  }catch(e){
+    failProgress(e.message);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = '重新采集';
   }
-  if(!html)html='<div class="empty"><div class="icon">📭</div>未采集到有效信息</div>';
-  result.innerHTML=html;
 }
+
+function renderResult(d){
+  currentImages = d.images || [];
+  // 基本信息
+  setField('fTitle', d.title);
+  setField('fBrand', d.brand);
+  setField('fSku', d.sku);
+  setField('fPrice', d.price);
+
+  // 关于此商品
+  const bulletsEl = document.getElementById('fBullets');
+  if(d.bullets && d.bullets.length){
+    bulletsEl.classList.remove('placeholder');
+    const allText = d.bullets.join('\\n');
+    let html = '<li style="margin-bottom:10px"><button class="copy-btn" onclick="copyText(' + JSON.stringify(allText) + ', this)">📋 复制全部</button></li>';
+    d.bullets.forEach(b=>{ html += '<li>' + escapeHtml(b) + '</li>'; });
+    bulletsEl.innerHTML = html;
+  } else {
+    bulletsEl.textContent = '未采集到';
+    bulletsEl.classList.add('placeholder');
+  }
+
+  // 图片
+  const imgEl = document.getElementById('fImages');
+  if(currentImages.length){
+    imgEl.classList.remove('placeholder');
+    let html = '';
+    currentImages.forEach((src,i)=>{
+      const dl = '/api/proxy_image?url=' + encodeURIComponent(src);
+      html += '<a class="media-item" href="'+dl+'" download><img src="'+src+'" alt="主图'+(i+1)+'" loading="lazy" onerror="this.style.opacity=.3"><div class="dl-overlay"><span>⬇ 下载</span></div></a>';
+    });
+    imgEl.innerHTML = html;
+    document.getElementById('dlAllBtn').style.display = 'inline-flex';
+  } else {
+    imgEl.textContent = '未采集到图片';
+    imgEl.classList.add('placeholder');
+    document.getElementById('dlAllBtn').style.display = 'none';
+  }
+
+  // 视频
+  const vidEl = document.getElementById('fVideo');
+  if(d.video){
+    vidEl.classList.remove('placeholder');
+    vidEl.innerHTML = '<div class="video-thumb"><video src="'+d.video.master+'" muted playsinline preload="metadata"></video></div><div class="video-info"><div class="vtitle">主图视频</div><div class="vmeta">点击下方按钮下载为 MP4 文件</div></div><button class="btn btn-primary" onclick="downloadVideo(\\''+d.video.stream720+'\\', this)">⬇ 下载视频</button>';
+  } else {
+    vidEl.textContent = '暂无视频';
+    vidEl.classList.add('placeholder');
+  }
+}
+
+// 一键下载全部图片（逐个原图下载，不打包）
 async function downloadAllImages(){
-  if(!currentImages.length){toast('没有可下载的图片');return;}
-  const btn=document.getElementById('dlAllBtn');
-  btn.disabled=true;btn.innerHTML='<span class="spinner"></span> 打包中...';
-  try{
-    const resp=await fetch('/api/download_all_images',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({images:currentImages})});
-    if(!resp.ok){toast('下载失败');return;}
-    const blob=await resp.blob();
-    const a=document.createElement('a');
-    a.href=URL.createObjectURL(blob);
-    a.download='amazon_product_images.zip';
-    a.click();
-    URL.revokeObjectURL(a.href);
-    toast('全部图片已下载');
-  }catch(e){toast('下载失败: '+e.message);}
-  finally{btn.disabled=false;btn.innerHTML='⬇ 一键下载全部图片';}
+  if(!currentImages.length){ toast('没有可下载的图片'); return; }
+  const btn = document.getElementById('dlAllBtn');
+  btn.disabled = true;
+  const origText = btn.innerHTML;
+  let success = 0;
+  for(let i = 0; i < currentImages.length; i++){
+    btn.innerHTML = '<span class="spinner"></span> 下载中 ' + (i+1) + '/' + currentImages.length;
+    try{
+      const src = currentImages[i];
+      const dlUrl = '/api/proxy_image?url=' + encodeURIComponent(src);
+      const resp = await fetch(dlUrl);
+      if(!resp.ok) continue;
+      const blob = await resp.blob();
+      const ext = (src.match(/\\.(jpg|jpeg|png|webp)/i) || ['jpg'])[1];
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'image_' + String(i+1).padStart(2,'0') + '.' + ext;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+      success++;
+    }catch(e){}
+    // 间隔避免浏览器拦截多文件下载
+    await new Promise(r=>setTimeout(r, 400));
+  }
+  btn.disabled = false;
+  btn.innerHTML = origText;
+  toast('已下载 ' + success + ' 张图片');
 }
-async function downloadVideo(m3u8,btn){
-  btn.disabled=true;btn.innerHTML='<span class="spinner"></span> 转换中...';
+
+async function downloadVideo(m3u8, btn){
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 转换中...';
   try{
-    const resp=await fetch('/api/video',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:m3u8})});
-    if(!resp.ok){const j=await resp.json().catch(()=>({}));toast(j.error||'下载失败');btn.disabled=false;btn.textContent='⬇ 下载视频';return;}
-    const blob=await resp.blob();
-    const a=document.createElement('a');
-    a.href=URL.createObjectURL(blob);
-    a.download='amazon_product_video.mp4';
+    const resp = await fetch('/api/video',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:m3u8})});
+    if(!resp.ok){ const j=await resp.json().catch(()=>({})); toast(j.error||'下载失败'); btn.disabled=false; btn.textContent='⬇ 下载视频'; return; }
+    const blob = await resp.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'amazon_product_video.mp4';
     a.click();
     URL.revokeObjectURL(a.href);
     toast('视频下载完成');
-  }catch(e){toast('下载失败: '+e.message);}
-  finally{btn.disabled=false;btn.textContent='⬇ 下载视频';}
+  }catch(e){ toast('下载失败: '+e.message); }
+  finally{ btn.disabled=false; btn.textContent='⬇ 下载视频'; }
 }
-document.getElementById('urlInput').addEventListener('keydown',e=>{if(e.key==='Enter')doScrape();});
+
+document.getElementById('urlInput').addEventListener('keydown', e=>{ if(e.key==='Enter') doScrape(); });
 </script>
 </body>
 </html>`;
