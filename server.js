@@ -861,7 +861,8 @@ app.post('/api/download_all_images', async (req, res) => {
   archive.on('error', (err) => { res.status(500).end(); });
   archive.pipe(res);
 
-  let idx = 1;
+  // 收集已用文件名，避免重名覆盖
+  const usedNames = new Set();
   for (const imgUrl of images) {
     try {
       const r = await axios.get(imgUrl, {
@@ -869,10 +870,23 @@ app.post('/api/download_all_images', async (req, res) => {
         responseType: 'arraybuffer',
         timeout: 30000,
       });
-      const ext = (imgUrl.match(/\.(jpg|jpeg|png|webp)/i) || ['.jpg'])[1];
-      const name = `image_${String(idx).padStart(2, '0')}.${ext}`;
+      // 用 URL 里的默认文件名，同文件多份时自动加 _1 / _2 后缀
+      let name = path.basename(new URL(imgUrl).pathname);
+      if (!name || !/\.(jpg|jpeg|png|webp|gif)$/i.test(name)) {
+        name = `image.${(imgUrl.match(/\.(jpg|jpeg|png|webp)/i) || ['.jpg'])[1].replace(/^\./, '')}`;
+      }
+      // 去重：同名已用则加后缀
+      if (usedNames.has(name)) {
+        const m = name.match(/^(.+?)(\.[^.]+)$/);
+        if (m) {
+          let n = 1;
+          let cand = `${m[1]}_${n}${m[2]}`;
+          while (usedNames.has(cand)) cand = `${m[1]}_${++n}${m[2]}`;
+          name = cand;
+        }
+      }
+      usedNames.add(name);
       archive.append(Buffer.from(r.data), { name });
-      idx++;
     } catch (e) {
       // 跳过失败的图片
     }
