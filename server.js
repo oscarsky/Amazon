@@ -747,15 +747,22 @@ async function scrape(productUrl) {
   const images = galleryImgs;
   const fallbackImg = (images && images[0]) ? images[0] : '';
 
-  // 其他SKU：只取页面上可见的变体选择按钮（parseVariants），
-  // 图片从 colorImages 中按名称匹配（英文原文）
-  let variants = parseVariants($);
-  variants.forEach(v => {
-    if (!v.image) {
-      const cu = colorImages[v.name];
-      v.image = (cu && cu[0]) || fallbackImg;
+  // 其他SKU：colorImages 的 key 就是页面"尺寸规格"选择器的完整权威列表
+  // （亚马逊 JS 框架生成，顺序就是页面显示顺序，每个 key 对应一个变体 hiRes 图）
+  // 直接用 colorImages 生成变体，不再依赖 DOM 扫描（DOM 容易嵌套重复、展开/折叠状态不一致）
+  // 排除 "initial" key —— 那是公共画廊不是变体
+  let variants = [];
+  if (Object.keys(colorImages).length > 0) {
+    for (const [variantName, urls] of Object.entries(colorImages)) {
+      if (variantName === 'initial') continue;
+      const img = (urls && urls[0]) || fallbackImg;
+      variants.push({ name: variantName, image: img });
     }
-  });
+  } else {
+    // 兜底：colorImages 不可用时才回退到 DOM 扫描
+    variants = parseVariants($);
+    variants.forEach(v => { if (!v.image) v.image = fallbackImg; });
+  }
 
   return { title, price: priceDetail.total, priceDetail, bullets, images, video, brand, dimensions, variants, url: productUrl };
 }
