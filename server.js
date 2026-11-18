@@ -740,17 +740,17 @@ async function scrape(productUrl) {
     seenImgIds.add(id);
     galleryImgs.push(url);
   };
-  // hiRes 图 ID -> URL 映射
+  // hiRes 图 ID -> URL 映射（构建时先不排除变体图，因为 altImages 兜底时可能会用到；
+  // 但要注意 seenImgIds.add 会阻止变体图被加回 galleryImgs）
   const hiResById = new Map();
   for (const u of parseAllHiResImages(html)) {
     const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
     if (m) hiResById.set(m[1], u);
   }
-  // 所有变体图 ID（colorImages 各变体 key 下的专属主图）
+  // 所有变体图 ID（colorImages 各变体 key 下的专属主图 + initial 里除 MAIN 外的 PTxx 变体图）
   const allVariantImgIds = new Set();
   for (const [variantName, urls] of Object.entries(colorImages)) {
-    // 跳过 "initial" —— 那是公共画廊，不是某个具体变体的专属图
-    if (variantName === 'initial') continue;
+    if (variantName === 'initial' || variantName === 'videos') continue;
     for (const u of urls) {
       const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
       if (m) {
@@ -759,32 +759,36 @@ async function scrape(productUrl) {
       }
     }
   }
+  // initial 数组里除 MAIN 以外的 PTxx variant 都是变体专属图，也要排除出主画廊
+  for (const arr of Object.values(colorImages)) {
+    if (!Array.isArray(arr)) continue;
+    for (const it of arr) {
+      if (!it || !it.variant || it.variant === 'MAIN') continue;
+      if (it.physicalIdForMedia) allVariantImgIds.add(it.physicalIdForMedia);
+      if (it.hiRes) {
+        const m = it.hiRes.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+        if (m) allVariantImgIds.add(m[1]);
+      }
+    }
+  }
   // 源1. hiRes 排除变体专属图 —— 这是主图顺序的权威来源
+  let debugIn = 0, debugEx = 0;
   for (const u of parseAllHiResImages(html)) {
+    debugIn++;
     const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
     const id = m ? m[1] : u;
-    if (allVariantImgIds.has(id)) continue;
+    if (allVariantImgIds.has(id)) { debugEx++; continue; }
     addImg(u);
   }
-  // 源2. #altImages 仅做兜底补充 —— 当 hiRes 被截断时补漏
-  $('#altImages img').each((_, el) => {
-    const src = $(el).attr('src') || '';
-    if (!src.includes('/images/I/')) return;
-    if (/\/video\//i.test(src)) return;
-    const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-    if (!m) return;
-    const imgId = m[1];
-    const hiRes = hiResById.get(imgId);
-    if (hiRes) addImg(hiRes);
-    else addImg(`https://m.media-amazon.com/images/I/${imgId}._SL1500_.jpg`);
-  });
+  console.log('[DEBUG gallery] parseAllHiRes=' + debugIn + ' excluded=' + debugEx + ' afterAdd=' + galleryImgs.length);
+  // 源2. #altImages 已不再需要 — parseAllHiResImages 已能拿到完整公共画廊
+  // （且之前因为 altImages 缩略图 ID 与 hiRes 变体 ID 不同，导致 allVariantImgIds 过滤失效
+  //  变体缩略图被加回画廊。现在直接跳过 altImages 源，画廊完全由源1 决定）
+  // 如将来某个极端情况 parseAllHiResImages 被 CAPTCHA 截断，再考虑重开 altImages 兜底
 
-  // 截断：权威顺序就是 hiRes 过滤后的顺序，直接切前 8 张
-  // 之前的错误逻辑是"优先保留 altImages 映射到的图"，但 altImages 缩略图 ID 与
-  // colorImages.initial 里的 hiRes ID 完全不同，会把真正的画廊图（如品牌宣传图）挤掉
-  if (galleryImgs.length > 8) {
-    galleryImgs.length = 8;
-  }
+  // 不再硬截断 8 张：主图画廊数量完全取决于 colorImages 里有多少张实际可用图
+  // （含 MAIN 主图 + PTxx 变体图 + 品牌宣传图），每张都保留
+  // 过滤时已排除了纯变体图 ID，剩余就是真实画廊
   // 兜底
   if (galleryImgs.length === 0) {
     let selectedImgs = null;
@@ -826,22 +830,32 @@ async function scrape(productUrl) {
     }
   } else {
     // 新形态：colorImages 只有 initial（variants 藏在 initial 的 variant 字段里，如 PT02 / PT03 ...）
-    // 需要结合 swatch DOM（拿可读文本名）+ thumbnailIndex（跟 PT 编号对齐）
+    // initial 数组里 MAIN 之后的 PTxx 条目 与 swatch DOM 的 idx 按顺序对齐
     const initial = colorImages.initial || [];
     const pt2img = {}; // PTxx -> hiRes URL
+    const variantOrder = []; // MAIN 之后的 PTxx 按出现顺序
     for (const it of initial) {
       const v = it && it.variant;
-      if (v && v !== 'MAIN' && it.hiRes) pt2img[v] = it.hiRes;
+      if (v && v !== 'MAIN') {
+        if (it.hiRes) pt2img[v] = it.hiRes;
+        variantOrder.push(v);
+      }
     }
-    // idx -> PT 映射：从 variant-PTxx class + thumbnailIndex 提取（两种顺序都兼容）
+    // 扫描 swatchAvailable 变体名，按 idx 顺序对应 variantOrder 的 PTxx
+    // 为什么能对齐：Amazon 前端生成 initial 数组时 MAIN 在前，然后 PT02/PT03/... 跟 swatch DOM 的 idx 顺序一致
     const rawHTML = $.html();
+    // 也建个 thumbnailIndex -> PT 映射（从 data-thumb-action JSON，更精准的兜底）
     const idx2PT = {};
+    const re = /data-thumb-action="(\{[^"]+\})"/g;
     let rm;
-    const re1 = /variant-(PT[0-9]+)[^}]*?thumbnailIndex["']?\s*:\s*(\d+)/g;
-    while ((rm = re1.exec(rawHTML)) !== null) idx2PT[parseInt(rm[2], 10)] = rm[1];
-    const re2 = /thumbnailIndex["']?\s*:\s*(\d+)[^}]*?variant["']?\s*:\s*["'](PT[0-9]+)["']/g;
-    while ((rm = re2.exec(rawHTML)) !== null) idx2PT[parseInt(rm[1], 10)] = rm[2];
+    while ((rm = re.exec(rawHTML)) !== null) {
+      try {
+        const obj = JSON.parse(rm[1].replace(/&quot;/g, '"'));
+        if (obj.variant && typeof obj.thumbnailIndex === 'number') idx2PT[obj.thumbnailIndex] = obj.variant;
+      } catch (e) {}
+    }
     // 扫描 swatch DOM 拿可读变体名
+    const swatchList = [];
     $('li[data-csa-c-content-id*="swatch"]').each((_, el) => {
       const $li = $(el);
       const cid = ($li.attr('data-csa-c-content-id') || '').toLowerCase();
@@ -851,17 +865,25 @@ async function scrape(productUrl) {
       if (!txt) return;
       const idxStr = $li.attr('data-idxintoggleswatchlist');
       const idx = idxStr != null ? parseInt(idxStr, 10) : null;
-      // 匹配 hiRes：先 idx2PT 精确，再按 PT0x = idx+1 顺序兜底
+      swatchList.push({ name: txt, idx });
+    });
+    // 匹配 hiRes：优先 idx2PT[swatch.idx+1]（thumbnailIndex 比 swatch idx 多 1 因为 MAIN 占位 thumb idx=0）
+    // 其次 initial 数组里 MAIN 之后的 PT 位置 = swatch idx
+    for (const s of swatchList) {
       let hiRes = null;
-      if (idx != null) {
-        if (idx2PT[idx] && pt2img[idx2PT[idx]]) hiRes = pt2img[idx2PT[idx]];
-        else {
-          const ptFallback = 'PT' + String(idx + 1).padStart(2, '0');
-          if (pt2img[ptFallback]) hiRes = pt2img[ptFallback];
+      if (s.idx != null) {
+        // 1) thumbnailIndex = swatch idx + 1 (MAIN 占位 thumb idx=0)
+        const tIdx = s.idx + 1;
+        if (idx2PT[tIdx] && pt2img[idx2PT[tIdx]]) {
+          hiRes = pt2img[idx2PT[tIdx]];
+        }
+        // 2) 兜底：直接 variantOrder[swatch.idx]
+        if (!hiRes && variantOrder[s.idx] && pt2img[variantOrder[s.idx]]) {
+          hiRes = pt2img[variantOrder[s.idx]];
         }
       }
-      variants.push({ name: txt, image: hiRes || fallbackImg });
-    });
+      variants.push({ name: s.name, image: hiRes || fallbackImg });
+    }
     // 最后兜底：swatch DOM 也没找到时用 parseVariants
     if (variants.length === 0) {
       variants = parseVariants($);
@@ -885,7 +907,7 @@ async function scrape(productUrl) {
     }
   }
 
-  return { title, price: priceDetail.total, priceDetail, bullets, images, video: videoResult, brand, dimensions, variants, url: productUrl };
+  return { title, price: priceDetail.total, priceDetail, bullets, images, video: videoResult, brand, dimensions, variants, url: productUrl, _debug: { galleryIn: debugIn, galleryExcluded: debugEx, allVariantIdsCount: allVariantImgIds.size, altFinal: galleryImgs.length } };
 }
 
 // ==================== 路由 ====================
