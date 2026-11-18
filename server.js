@@ -277,6 +277,12 @@ function parseDimensions($) {
  * 解析当前选中的变体名称（保留英文原文）
  */
 function parseSelectedVariant($) {
+  // 0. data-initiallySelected="true" 的 swatch li —— Amazon 新版结构
+  const initSel = $('li[data-initiallyselected="true"], li[data-initiallySelected="true"]').toArray();
+  for (const el of initSel) {
+    const txt = cleanText($(el).find('.swatch-title-text-display, .a-button-text').first().text());
+    if (txt && txt.length > 0 && txt.length < 80) return txt;
+  }
   // 1. 遍历所有 a-button-selected 内的图片，找第一个有 alt 的
   const selImgs = $('.a-button-selected img').toArray();
   for (const el of selImgs) {
@@ -632,6 +638,7 @@ function parsePriceDetail($) {
   }
 
   // 方法2: 通过"總計/总计"等标签所在行找价格
+  // 价格可能是 .a-offscreen（主价格），也可能是 tr 里同 row 下的任何 CNY/¥ 文本（如总计行）
   $('.a-color-secondary').each((_, el) => {
     const label = cleanText($(el).text());
     let key = null;
@@ -643,7 +650,12 @@ function parsePriceDetail($) {
     if (key) {
       const $row = $(el).closest('.a-row, tr');
       if (!$row.length) return;
-      const priceEl = $row.find('.a-offscreen').first();
+      // 优先 .a-offscreen（主价格标签里的）
+      let priceEl = $row.find('.a-offscreen').first();
+      // 兜底：找同 row 里任何包含 "CNY" / "¥" / "$" 的 span
+      if (!priceEl.length) {
+        priceEl = $row.find('span').filter((_, s) => /(?:CNY|¥|\$)\s*[\d.,]+/.test(cleanText($(s).text()))).first();
+      }
       if (!priceEl.length) return;
       const val = cleanText(priceEl.text());
       if (!val || !/\d/.test(val)) return;
@@ -726,10 +738,10 @@ async function scrape(productUrl) {
   // 从 colorImages 中获取变体名称 -> 高清图片数组 的映射（名称为英文原文）
   const colorImages = parseColorImages(html);
 
-  // 主图：采集"查看完整视图"画廊中的全部高清原图
-  // 方案：hiRes 排除变体专属图 为主（这是最权威的数据源，顺序即 colorImages.initial 原始顺序）
-  //       #altImages 仅做兜底补充（当 hiRes 因 CAPTCHA 变少或重复时）
-  //       截断时按权威顺序直接切前 8 张，不能用 altImages 反过来覆盖 hiRes
+  // 主图画廊 = colorImages.initial 里每个 variant 的 hiRes（按数组顺序）
+  // Efferdent: MAIN + PT02 + PT03 + PT04 + PT05 + PT06 + PT08 = 7 张
+  // B00513SMME: MAIN + PT01 + ... = 8 张
+  // 注意：不再排除 PTxx！Amazon 前端画廊就是按 variant 顺序展示
   const galleryImgs = [];
   const seenImgIds = new Set();
   const addImg = (url) => {
@@ -740,80 +752,29 @@ async function scrape(productUrl) {
     seenImgIds.add(id);
     galleryImgs.push(url);
   };
-  // hiRes 图 ID -> URL 映射（构建时先不排除变体图，因为 altImages 兜底时可能会用到；
-  // 但要注意 seenImgIds.add 会阻止变体图被加回 galleryImgs）
-  const hiResById = new Map();
-  for (const u of parseAllHiResImages(html)) {
-    const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-    if (m) hiResById.set(m[1], u);
+  // 1) colorImages.initial 里每个 variant 的 hiRes 是最权威来源
+  const initial = colorImages.initial || [];
+  for (const it of initial) {
+    if (!it) continue;
+    const hr = it.hiRes || it.large;
+    if (hr) addImg(hr);
   }
-  // 所有变体图 ID（colorImages 各变体 key 下的专属主图 + initial 里除 MAIN 外的 PTxx 变体图）
-  const allVariantImgIds = new Set();
-  for (const [variantName, urls] of Object.entries(colorImages)) {
-    if (variantName === 'initial' || variantName === 'videos') continue;
-    for (const u of urls) {
-      const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-      if (m) {
-        allVariantImgIds.add(m[1]);
-        if (!hiResById.has(m[1])) hiResById.set(m[1], u);
-      }
-    }
-  }
-  // initial 数组里除 MAIN 以外的 PTxx variant 都是变体专属图，也要排除出主画廊
-  for (const arr of Object.values(colorImages)) {
+  // 2) 如果有 colorImages 的二级 key（老形态，key 就是变体名），它们的 hiRes 也加进来
+  //    避免某些商品画廊既在 initial 也在二级 key 里
+  for (const [k, arr] of Object.entries(colorImages)) {
+    if (k === 'initial' || k === 'videos') continue;
     if (!Array.isArray(arr)) continue;
     for (const it of arr) {
-      if (!it || !it.variant || it.variant === 'MAIN') continue;
-      if (it.physicalIdForMedia) allVariantImgIds.add(it.physicalIdForMedia);
-      if (it.hiRes) {
-        const m = it.hiRes.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-        if (m) allVariantImgIds.add(m[1]);
-      }
+      if (!it) continue;
+      const hr = it.hiRes || it.large;
+      if (hr) addImg(hr);
     }
   }
-  // 源1. hiRes 排除变体专属图 —— 这是主图顺序的权威来源
-  let debugIn = 0, debugEx = 0;
-  for (const u of parseAllHiResImages(html)) {
-    debugIn++;
-    const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-    const id = m ? m[1] : u;
-    if (allVariantImgIds.has(id)) { debugEx++; continue; }
-    addImg(u);
-  }
-  console.log('[DEBUG gallery] parseAllHiRes=' + debugIn + ' excluded=' + debugEx + ' afterAdd=' + galleryImgs.length);
-  // 源2. #altImages 已不再需要 — parseAllHiResImages 已能拿到完整公共画廊
-  // （且之前因为 altImages 缩略图 ID 与 hiRes 变体 ID 不同，导致 allVariantImgIds 过滤失效
-  //  变体缩略图被加回画廊。现在直接跳过 altImages 源，画廊完全由源1 决定）
-  // 如将来某个极端情况 parseAllHiResImages 被 CAPTCHA 截断，再考虑重开 altImages 兜底
-
-  // 不再硬截断 8 张：主图画廊数量完全取决于 colorImages 里有多少张实际可用图
-  // （含 MAIN 主图 + PTxx 变体图 + 品牌宣传图），每张都保留
-  // 过滤时已排除了纯变体图 ID，剩余就是真实画廊
-  // 兜底
+  // 兜底：CAPTCHA 导致 initial 为空时，用 parseAllHiResImages
   if (galleryImgs.length === 0) {
-    let selectedImgs = null;
-    if (dimensions) {
-      const dimStr = String(dimensions);
-      selectedImgs = colorImages[dimStr] || null;
-      if (!selectedImgs) {
-        const dimLower = dimStr.toLowerCase();
-        for (const [name, urls] of Object.entries(colorImages)) {
-          const nl = name.toLowerCase();
-          if (nl === dimLower || nl.includes(dimLower) || dimLower.includes(nl)) {
-            selectedImgs = urls; break;
-          }
-        }
-      }
-    }
-    if (selectedImgs) selectedImgs.forEach(addImg);
     for (const u of parseAllHiResImages(html)) addImg(u);
-    $('#altImages img').each((_, el) => {
-      const src = $(el).attr('src') || '';
-      const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-      if (m) addImg(`https://m.media-amazon.com/images/I/${m[1]}._SL1500_.jpg`);
-    });
-    if (galleryImgs.length === 0) parseImages($).forEach(addImg);
   }
+  console.log('[DEBUG gallery] final=' + galleryImgs.length);
 
   const images = galleryImgs;
   const fallbackImg = (images && images[0]) ? images[0] : '';
@@ -907,7 +868,7 @@ async function scrape(productUrl) {
     }
   }
 
-  return { title, price: priceDetail.total, priceDetail, bullets, images, video: videoResult, brand, dimensions, variants, url: productUrl, _debug: { galleryIn: debugIn, galleryExcluded: debugEx, allVariantIdsCount: allVariantImgIds.size, altFinal: galleryImgs.length } };
+  return { title, price: priceDetail.total, priceDetail, bullets, images, video: videoResult, brand, dimensions, variants, url: productUrl, _debug: { galleryInCount: initial.length, galleryFinal: galleryImgs.length, variantCount: variants.length } };
 }
 
 // ==================== 路由 ====================
