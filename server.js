@@ -23,19 +23,33 @@ const TMP_DIR = process.env.TMPDIR || '/tmp';
 // 繁体 -> 简体
 const converter = OpenCC.Converter({ from: 'tw', to: 'cn' });
 
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-  'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
-  'Accept-Encoding': 'gzip, deflate, br',
-  'Connection': 'keep-alive',
-  'Upgrade-Insecure-Requests': '1',
-  'Sec-Fetch-Dest': 'document',
-  'Sec-Fetch-Mode': 'navigate',
-  'Sec-Fetch-Site': 'none',
-  'Sec-Fetch-User': '?1',
-  'Cache-Control': 'max-age=0',
-};
+// 多个真实浏览器 UA 轮换
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+];
+
+function buildHeaders() {
+  const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+  const isWin = ua.includes('Windows');
+  return {
+    'User-Agent': ua,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0',
+    'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': isWin ? '"Windows"' : '"macOS"',
+  };
+}
 
 function t2s(text) {
   if (!text) return text;
@@ -51,49 +65,53 @@ function cleanText(text) {
 }
 
 /**
- * 抓取亚马逊商品页面
+ * 抓取亚马逊商品页面（直接获取源码，不走验证流程）
  */
 async function fetchAmazon(productUrl) {
-  // 规范化 URL，强制 zh_TW + CNY，配送至中国以显示 AmazonGlobal 运费
+  // 规范化 URL，强制 zh_CN + CNY，配送至中国
   const parsed = new URL(productUrl);
-  parsed.searchParams.set('language', 'zh_TW');
+  parsed.searchParams.set('language', 'zh_CN');
   parsed.searchParams.set('currency', 'CNY');
   parsed.searchParams.set('shipToCountry', 'CN');
   const cleanUrl = parsed.toString();
 
   let lastErr = null;
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     try {
+      const headers = buildHeaders();
       const instance = axios.create({
-        headers: HEADERS,
+        headers,
         maxRedirects: 5,
         timeout: 30000,
         decompress: true,
+        withCredentials: true,
       });
-      // 先访问主页预热，并尝试设置配送至中国，收集 Cookie
+
+      // 预热：访问主页获取 cookie
       let cookieHeader = '';
       try {
-        const warmup = await instance.get('https://www.amazon.com?shipToCountry=CN&currency=CNY', { timeout: 15000 });
+        const warmup = await instance.get('https://www.amazon.com/', { timeout: 12000 });
         const setCookies = warmup.headers['set-cookie'];
         if (Array.isArray(setCookies) && setCookies.length) {
           cookieHeader = setCookies.map(c => c.split(';')[0]).join('; ');
         }
-        await new Promise(r => setTimeout(r, 1000 + attempt * 500));
+        await new Promise(r => setTimeout(r, 800 + attempt * 400));
       } catch (e) { /* ignore warmup failure */ }
 
-      const prodHeaders = { ...HEADERS };
+      const prodHeaders = { ...headers };
+      prodHeaders['Referer'] = 'https://www.amazon.com/';
       if (cookieHeader) prodHeaders['Cookie'] = cookieHeader;
       const r = await instance.get(cleanUrl, { headers: prodHeaders });
-      if (r.status === 200 && !r.data.includes('validateCaptcha')) {
+      if (r.status === 200 && !r.data.includes('validateCaptcha') && !r.data.includes('Type the characters')) {
         return r.data;
       }
       lastErr = `status=${r.status}`;
     } catch (e) {
       lastErr = e.message;
     }
-    await new Promise(r => setTimeout(r, 1500 + attempt * 1000));
+    await new Promise(r => setTimeout(r, 1200 + attempt * 800));
   }
-  throw new Error(`亚马逊返回了验证码页面或请求失败（${lastErr}），请稍后重试`);
+  throw new Error(`请求失败（${lastErr}），请稍后重试`);
 }
 
 /**
@@ -215,12 +233,39 @@ function parseBrand($) {
   return null;
 }
 
-function parseSku($) {
-  // 优先返回当前选中的变体名称（如"1瓶（4盎司）"）
+/**
+ * 解析商品尺寸/规格信息（如 "1.38 Ounce (Pack of 50)"）
+ */
+function parseDimensions($) {
+  // 1. 优先从详情列表获取 Item Weight / 商品重量
+  const itemWeight = parseDetailRow($, ['Item Weight', '商品重量', '物品重量', '產品重量']);
+  // 2. 获取 Product Dimensions / 商品尺寸
+  const dimensions = parseDetailRow($, ['Product Dimensions', '商品尺寸', '產品尺寸', '尺寸']);
+  // 3. 获取包装数量
+  const packInfo = parseDetailRow($, ['Number of Items', '件数', '商品数量', 'NumberOfItems']);
+  // 4. 获取当前选中的变体名称（可能包含规格）
   const selected = parseSelectedVariant($);
+
+  // 组合结果：重量 + 包装信息
+  const parts = [];
+  if (itemWeight) parts.push(itemWeight);
+  if (packInfo && !itemWeight?.includes(packInfo)) parts.push(`(${packInfo})`);
+  if (selected && !itemWeight?.includes(selected) && !packInfo?.includes(selected)) {
+    // 变体名可能含 Pack of X
+    const packMatch = selected.match(/Pack of \d+/i);
+    if (packMatch && !parts.some(p => p.includes(packMatch[0]))) {
+      parts.push(`(${packMatch[0]})`);
+    } else if (!packMatch && selected.length < 50) {
+      parts.push(selected);
+    }
+  }
+
+  if (parts.length) return cleanText(parts.join(' '));
+  // 兜底：商品尺寸
+  if (dimensions) return dimensions;
+  // 再兜底：变体名称
   if (selected) return selected;
-  // 否则返回项目型号
-  return parseDetailRow($, ['項目型號', '项目型号', 'Item model number', 'SKU', '庫存單位']);
+  return null;
 }
 
 /**
@@ -406,10 +451,10 @@ async function scrape(productUrl) {
   const images = parseImages($);
   const video = parseVideo(html);
   const brand = parseBrand($);
-  const sku = parseSku($);
+  const dimensions = parseDimensions($);
   const variants = parseVariants($);
 
-  return { title, price: priceDetail.total, priceDetail, bullets, images, video, brand, sku, variants, url: productUrl };
+  return { title, price: priceDetail.total, priceDetail, bullets, images, video, brand, dimensions, variants, url: productUrl };
 }
 
 // ==================== 路由 ====================
@@ -439,7 +484,7 @@ app.get('/api/proxy_image', async (req, res) => {
   }
   try {
     const r = await axios.get(imgUrl, {
-      headers: HEADERS,
+      headers: buildHeaders(),
       responseType: 'stream',
       timeout: 30000,
     });
@@ -469,7 +514,7 @@ app.post('/api/download_all_images', async (req, res) => {
   for (const imgUrl of images) {
     try {
       const r = await axios.get(imgUrl, {
-        headers: HEADERS,
+        headers: buildHeaders(),
         responseType: 'arraybuffer',
         timeout: 30000,
       });
@@ -676,7 +721,7 @@ const INDEX_HTML = `<!DOCTYPE html>
       <div class="field-value placeholder" id="fBrand">等待采集...</div>
     </div>
     <div class="field">
-      <div class="field-label">SKU</div>
+      <div class="field-label">尺寸/规格</div>
       <div class="field-value placeholder" id="fSku">等待采集...</div>
     </div>
     <div class="field">
@@ -831,16 +876,12 @@ function failProgress(msg){
   const url = document.getElementById('urlInput').value.trim();
   link.href = url || '#';
 
-  // 判断是否为验证码相关错误
-  const isCaptcha = /验证码|validateCaptcha|status=200|timeout/i.test(msg || '');
-  if(isCaptcha){
-    title.textContent = '🛡️ 亚马逊触发了人机验证';
-    desc.innerHTML = '这是亚马逊的反爬机制，并非工具故障。<br>' +
-      '建议按以下方式解决（任选其一）：<br>' +
-      '1. 点击「打开商品页」，在新标签页中<b>登录你的亚马逊账户</b>并完成验证码，然后回到本页点击「重新采集」；<br>' +
-      '2. 若未登录账户，可在亚马逊页面完成人机验证后再回来重试；<br>' +
-      '3. 也可以等待 <b>30~60 秒</b> 后直接点击「重新采集」。<br>' +
-      '<span style="color:#888;font-size:12px">提示：登录账户后采集成功率更高，频繁采集同一商品也容易触发验证。</span>';
+  // 判断是否为请求失败/验证码
+  const isFail = /验证码|validateCaptcha|status=200|timeout|失败|请求失败/i.test(msg || '');
+  if(isFail){
+    title.textContent = '🛡️ 采集失败，请稍后重试';
+    desc.innerHTML = '服务器请求亚马逊时被拦截或超时，这是亚马逊的反爬机制。<br>' +
+      '请等待 <b>30~60 秒</b> 后点击「重新采集」，或换个商品链接再试。';
   } else {
     title.textContent = '采集失败';
     desc.textContent = msg || '未知错误，请检查链接是否正确后重试。';
@@ -894,7 +935,7 @@ function renderResult(d){
   // 基本信息
   setField('fTitle', d.title);
   setField('fBrand', d.brand);
-  setField('fSku', d.sku);
+  setField('fSku', d.dimensions);
 
   // 价格：优先显示总价（含配送+进口费），并展示明细
   const priceEl = document.getElementById('fPrice');
