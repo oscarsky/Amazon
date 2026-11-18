@@ -815,8 +815,46 @@ async function scrape(productUrl) {
         if (obj.variant && typeof obj.thumbnailIndex === 'number') idx2PT[obj.thumbnailIndex] = obj.variant;
       } catch (e) {}
     }
-    // 扫描 swatch DOM 拿可读变体名
-    const swatchList = [];
+    // 扫描 swatch DOM 拿可读变体名 + 所属分组标签
+    // 多分组商品（尺寸+口味）时只保留"尺寸/count/盎司"这类分组，跳过 flavor/color 等
+    const SIZE_KEYWORDS = /尺寸|规格|重量|容量|数量|净含量|count|pack|size|weight|volume|quantity|盎司|fl.?oz|\boz\b|ml\b|litre|liter|kg|g\b|lb\b|片|粒|瓶|罐|盒|包/;
+    const EXCLUDE_KEYWORDS = /口味|味道|风味|香味|香气|类型|款式|颜色|色|flavor|taste|scent|color|style|type/;
+    // 粗略的"这不是分组名而是变体名"判定（避免把 "4盎司" 这种变体名误当分组名）
+    const swatchNameRegex = /[0-9]|count|pack|pack of|盎司|fl.?oz|\boz\b|口味|flavor|颜色|color/;
+
+    function detectGroupLabel($li) {
+      // 往上找：label 标签 / 带分组文字的 .a-button-text / .twister-popper-trigger
+      let p = $li.parent();
+      let depth = 0;
+      while (p.length && depth < 8) {
+        // 1) 父容器的直接 label 子元素
+        const directLbl = p.find('> label').first();
+        if (directLbl.length) {
+          const t = cleanText(directLbl.text()).replace(/[:：]/g,'').trim();
+          if (t && t.length < 60) return t;
+        }
+        // 2) 父容器的 .a-button-text 子元素（常是分组名）
+        const btnLbl = p.find('> .a-button-text').first();
+        if (btnLbl.length && btnLbl.text().trim().length < 80) {
+          const t = cleanText(btnLbl.text()).replace(/[:：]/g,'').trim();
+          if (t && t.length < 60 && !swatchNameRegex.test(t)) return t;
+        }
+        // 3) 前一个兄弟节点里是否有 label / 分组文字
+        const prevSib = p.prev();
+        if (prevSib.length) {
+          const lbl = prevSib.find('label, .a-button-text').first();
+          if (lbl.length) {
+            const t = cleanText(lbl.text()).replace(/[:：]/g,'').trim();
+            if (t && t.length < 60 && !swatchNameRegex.test(t)) return t;
+          }
+        }
+        p = p.parent();
+        depth++;
+      }
+      return '';
+    }
+
+    const swatchListRaw = [];
     $('li[data-csa-c-content-id*="swatch"]').each((_, el) => {
       const $li = $(el);
       const cid = ($li.attr('data-csa-c-content-id') || '').toLowerCase();
@@ -826,8 +864,24 @@ async function scrape(productUrl) {
       if (!txt) return;
       const idxStr = $li.attr('data-idxintoggleswatchlist');
       const idx = idxStr != null ? parseInt(idxStr, 10) : null;
-      swatchList.push({ name: txt, idx });
+      const groupLabel = detectGroupLabel($li);
+      swatchListRaw.push({ name: txt, idx, groupLabel });
     });
+
+    // 分组决策：多分组时优先保留"类尺寸"分组，单分组或无标签时全保留
+    const groupLabels = [...new Set(swatchListRaw.map(s => s.groupLabel).filter(Boolean))];
+    let filtered = swatchListRaw;
+    if (groupLabels.length >= 2) {
+      // 找出所有"类尺寸"分组
+      const sizeGroups = groupLabels.filter(g => SIZE_KEYWORDS.test(g) && !EXCLUDE_KEYWORDS.test(g));
+      if (sizeGroups.length > 0) {
+        filtered = swatchListRaw.filter(s => !s.groupLabel || sizeGroups.includes(s.groupLabel));
+      }
+    }
+    // 二次兜底：按变体名关键词再筛一次（名称含 EXCLUDE 关键词的单独踢掉）
+    filtered = filtered.filter(s => !EXCLUDE_KEYWORDS.test(s.name) || SIZE_KEYWORDS.test(s.name));
+
+    const swatchList = filtered;
     // 匹配 hiRes：优先 idx2PT[swatch.idx+1]（thumbnailIndex 比 swatch idx 多 1 因为 MAIN 占位 thumb idx=0）
     // 其次 initial 数组里 MAIN 之后的 PT 位置 = swatch idx
     for (const s of swatchList) {
@@ -1124,13 +1178,18 @@ const INDEX_HTML = `<!DOCTYPE html>
   .dl-overlay span { color: #fff; font-size: 13px; font-weight: 600; }
   .video-card { display: flex; align-items: center; gap: 16px; padding: 14px; background: #f7f8fa; border-radius: 8px; margin-top: 16px; }
   .video-card.placeholder { color: #bbb; font-style: italic; justify-content: center; }
-  /* 尺寸选择方框（亚马逊风格） */
-  .sku-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+  /* 尺寸选择方框（亚马逊风格 + 缩略图 + 可复制文字） */
+  .sku-grid { display: flex; flex-wrap: wrap; gap: 12px; }
   .sku-grid.placeholder { color: #bbb; font-style: italic; display: flex; align-items: center; justify-content: center; min-height: 40px; }
-  .sku-chip { position: relative; padding: 10px 16px; border: 1px solid #d5d9d9; border-radius: 4px; background: #fff; cursor: pointer; font-size: 13px; color: #444; line-height: 1.3; text-align: center; max-width: 160px; transition: border-color .12s, box-shadow .12s, color .12s; user-select: none; }
-  .sku-chip:hover { border-color: #ff9900; box-shadow: 0 0 0 1px #ff9900; color: #000; }
-  .sku-chip.sku-chip-active { border-color: #ff9900; box-shadow: 0 0 0 1px #ff9900; color: #000; }
-  .sku-chip .sku-chip-price { font-size: 11px; color: #888; margin-top: 3px; }
+  .sku-chip { position: relative; display: flex; flex-direction: column; align-items: center; width: 110px; padding: 10px 8px 8px; border: 1px solid #d5d9d9; border-radius: 6px; background: #fff; cursor: pointer; transition: border-color .12s, box-shadow .12s; user-select: none; }
+  .sku-chip:hover { border-color: #ff9900; box-shadow: 0 0 0 1px #ff9900; }
+  .sku-chip.sku-chip-active { border-color: #ff9900; box-shadow: 0 0 0 1px #ff9900; }
+  .sku-chip .sku-thumb { width: 64px; height: 64px; border-radius: 6px; overflow: hidden; background: #f7f7f7; margin-bottom: 8px; display: flex; align-items: center; justify-content: center; }
+  .sku-chip .sku-thumb img { width: 100%; height: 100%; object-fit: contain; }
+  .sku-chip .sku-thumb-empty { font-size: 11px; color: #bbb; }
+  .sku-chip .sku-name { font-size: 12px; color: #333; line-height: 1.35; text-align: center; word-break: break-word; }
+  .sku-chip .sku-name:hover { color: #ff9900; text-decoration: underline; }
+  .sku-chip .sku-copied { position: absolute; top: 4px; right: 4px; font-size: 10px; background: #4CAF50; color: #fff; padding: 1px 5px; border-radius: 3px; }
   .video-thumb { width: 120px; height: 68px; background: #000; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 11px; flex-shrink: 0; overflow: hidden; }
   .video-thumb video { width: 100%; height: 100%; object-fit: cover; }
   .video-info { flex: 1; }
@@ -1237,7 +1296,7 @@ const INDEX_HTML = `<!DOCTYPE html>
   <!-- 尺寸选择（亚马逊风格方框，hover/点击切换主图） -->
   <div class="card">
     <div class="media-header">
-      <div class="field-label">尺寸 / 规格</div>
+      <div class="field-label">其他尺寸</div>
     </div>
     <div class="sku-grid placeholder" id="fSkuImages">等待采集...</div>
   </div>
@@ -1507,7 +1566,7 @@ function renderResult(d){
     vidEl.classList.add('placeholder');
   }
 
-  // 尺寸选择方框（亚马逊风格）— hover/点击切换主图
+  // 尺寸选择方框 — 缩略图 + 文字可复制，hover 切换主图
   const skuEl = document.getElementById('fSkuImages');
   window._skuVariants = d.variants || [];
   if(d.variants && d.variants.length){
@@ -1515,12 +1574,20 @@ function renderResult(d){
     let html = '';
     d.variants.forEach((v,i)=>{
       const safeName = escapeHtml(v.name);
-      html += '<div class="sku-chip" data-img="'+(v.image?escapeHtml(v.image):'')+'" data-idx="'+i+'" title="切换到此尺寸对应图片">';
-      html += safeName;
+      html += '<div class="sku-chip" data-img="'+(v.image?escapeHtml(v.image):'')+'" data-idx="'+i+'">';
+      // 缩略图
+      if (v.image) {
+        html += '<div class="sku-thumb"><img src="'+v.image+'" alt="'+safeName+'" loading="lazy" onerror="this.style.display=\'none\'"></div>';
+      } else {
+        html += '<div class="sku-thumb"><span class="sku-thumb-empty">无图</span></div>';
+      }
+      // 可复制文字（点击复制，不冒泡到 chip 的 hover 行为）
+      html += '<div class="sku-name" data-copy="'+safeName+'" title="点击复制">'+safeName+'</div>';
       html += '</div>';
     });
     skuEl.innerHTML = html;
-    // 事件委托：hover 切换主图，离开时回到默认主图（或保持最后一次）
+
+    // 事件委托：整个 chip hover → 切换主图；.sku-name 点击 → 复制
     skuEl.addEventListener('mouseover', function(e){
       const chip = e.target.closest('.sku-chip');
       if(!chip) return;
@@ -1529,11 +1596,35 @@ function renderResult(d){
       this.querySelectorAll('.sku-chip-active').forEach(el=>el.classList.remove('sku-chip-active'));
       chip.classList.add('sku-chip-active');
     });
-    skuEl.addEventListener('mouseleave', function(){
-      this.querySelectorAll('.sku-chip-active').forEach(el=>el.classList.remove('sku-chip-active'));
+    skuEl.addEventListener('click', async function(e){
+      const nameEl = e.target.closest('.sku-name');
+      if(!nameEl) return;
+      e.stopPropagation();
+      const text = nameEl.dataset.copy || nameEl.textContent;
+      try { await navigator.clipboard.writeText(text); } catch(err) {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text; ta.style.position='fixed'; ta.style.opacity=0;
+          document.body.appendChild(ta); ta.select();
+          document.execCommand('copy'); document.body.removeChild(ta);
+        } catch(e2) {}
+      }
+      // 短暂的"已复制"视觉反馈
+      let tip = nameEl.querySelector('.sku-copied');
+      if (!tip) {
+        tip = document.createElement('span');
+        tip.className = 'sku-copied';
+        nameEl.style.position = 'relative';
+        nameEl.appendChild(tip);
+      }
+      tip.textContent = '已复制';
+      tip.style.display = '';
+      clearTimeout(window._skuCopiedTimer);
+      window._skuCopiedTimer = setTimeout(()=>{ tip.style.display='none'; }, 1200);
+      toast('已复制：' + text);
     });
   } else {
-    skuEl.textContent = '该商品无其他尺寸/规格';
+    skuEl.textContent = '该商品无其他尺寸';
     skuEl.classList.add('placeholder');
   }
 }
