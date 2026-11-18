@@ -220,9 +220,15 @@ function parseDetailRow($, keywords) {
 }
 
 function parseBrand($) {
-  let brand = parseDetailRow($, ['品牌名稱', '品牌名称']);
+  // 优先从商品详情表（productDetails_db_sections / detailBullets）里取"品牌"字段
+  // 注意：表格里的"品牌"就是真正的商品品牌（Boka、Pure Protein），而 byline 是店铺名（旗舰店）
+  const brandKeywords = [
+    '品牌', '品牌名称', '品牌名稱',   // 中文
+    'Brand', 'Brand Name',           // 英文
+  ];
+  let brand = parseDetailRow($, brandKeywords);
   if (brand) return brand;
-  // byline / 品牌旗舰店链接
+  // 兜底：byline / 品牌旗舰店链接（取店铺名作为最后的兜底）
   const a = $('a#bylineInfo, a[href*="/stores/"]').first();
   if (a.length) {
     const txt = a.text().trim();
@@ -635,6 +641,37 @@ function parsePriceDetail($) {
 }
 
 /**
+ * 把视频 m3u8 用 ffmpeg 异步转成 mp4，存到 TMP 目录
+ * 转为 mp4 后返回本地路径（失败则返回 null）
+ */
+function convertVideoToMp4(m3u8Url) {
+  return new Promise((resolve) => {
+    if (!m3u8Url) return resolve(null);
+    const outName = `amz_vid_${Date.now()}_${Math.random().toString(36).slice(2)}.mp4`;
+    const outPath = path.join(TMP_DIR, outName);
+    const ffmpegPath = require('ffmpeg-static');
+    const args = [
+      '-y', '-protocol_whitelist', 'file,http,https,tcp,tls,crypto,httpproxy',
+      '-i', m3u8Url,
+      '-c', 'copy', '-bsf:a', 'aac_adtstoasc',
+      outPath,
+    ];
+    const proc = spawn(ffmpegPath, args, { stdio: 'ignore' });
+    const timer = setTimeout(() => { try { proc.kill(); } catch(e){} resolve(null); }, 120000);
+    proc.on('error', () => { clearTimeout(timer); resolve(null); });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0 && fs.existsSync(outPath) && fs.statSync(outPath).size > 1024) {
+        resolve(outPath);
+      } else {
+        try { fs.unlinkSync(outPath); } catch(e){}
+        resolve(null);
+      }
+    });
+  });
+}
+
+/**
  * 主采集流程
  */
 async function scrape(productUrl) {
@@ -655,6 +692,12 @@ async function scrape(productUrl) {
   const video = parseVideo(html);
   const brand = parseBrand($);
   const dimensions = parseDimensions($);
+
+  // 并行启动视频转换（fire-and-forget，不阻塞主采集）
+  let videoPromise = null;
+  if (video && video.stream720) {
+    videoPromise = convertVideoToMp4(video.stream720);
+  }
 
   // 从 colorImages 中获取变体名称 -> 高清图片数组 的映射（名称为英文原文）
   const colorImages = parseColorImages(html);
@@ -748,13 +791,29 @@ async function scrape(productUrl) {
   const fallbackImg = (images && images[0]) ? images[0] : '';
 
   // 其他SKU：colorImages 的 key 就是页面"尺寸规格"选择器的完整权威列表
-  // （亚马逊 JS 框架生成，顺序就是页面显示顺序，每个 key 对应一个变体 hiRes 图）
-  // 直接用 colorImages 生成变体，不再依赖 DOM 扫描（DOM 容易嵌套重复、展开/折叠状态不一致）
-  // 排除 "initial" key —— 那是公共画廊不是变体
+  // 直接用 colorImages 生成变体，再用 swatch DOM 过滤 — 只保留"有推荐报价"（swatchAvailable）的 SKU
+  // DOM 里 swatch 每个 li 带 data-csa-c-content-id，值为：
+  //   - twister-desktop-twister-swatch-swatchAvailable （有推荐报价）
+  //   - twister-desktop-twister-swatch-swatchCurrentlyUnavailable / swatchUnavailable（无推荐报价，灰色不可点）
   let variants = [];
   if (Object.keys(colorImages).length > 0) {
+    // 扫描 swatch DOM，收集"有推荐报价"的变体名字
+    const availableNames = new Set();
+    $('li[data-csa-c-content-id*="swatchAvailable"], li[data-csa-c-content-id*="swatchCurrentlyUnavailable"]').each((_, el) => {
+      const $li = $(el);
+      const cid = ($li.attr('data-csa-c-content-id') || '').toLowerCase();
+      const isAvailable = cid.includes('swatchavailable') && !cid.includes('currentlyunavailable');
+      if (!isAvailable) return;
+      // 取按钮里的文字作为变体名
+      const txt = cleanText($li.find('.swatch-title-text-display, .a-button-text').first().text());
+      if (txt) availableNames.add(txt);
+    });
+
+    // 如果有 swatch 可用列表，则 colorImages 里只保留匹配的；否则全部保留（无推荐报价标记时）
     for (const [variantName, urls] of Object.entries(colorImages)) {
       if (variantName === 'initial') continue;
+      // 过滤掉没有推荐报价的 — 只有当 swatch 列表非空时才做过滤
+      if (availableNames.size > 0 && !availableNames.has(variantName)) continue;
       const img = (urls && urls[0]) || fallbackImg;
       variants.push({ name: variantName, image: img });
     }
@@ -764,7 +823,23 @@ async function scrape(productUrl) {
     variants.forEach(v => { if (!v.image) v.image = fallbackImg; });
   }
 
-  return { title, price: priceDetail.total, priceDetail, bullets, images, video, brand, dimensions, variants, url: productUrl };
+  // 等待视频预转换完成（已经在后台并行跑了，几乎无额外延迟）
+  let videoResult = video;
+  if (videoPromise) {
+    try {
+      const mp4Path = await videoPromise;
+      if (mp4Path && videoResult) {
+        // 用文件大小做简短缓存 TTL 7 天（简单 hash），让前端点击时还能直接下载
+        videoResult = { ...videoResult, mp4Ready: true, mp4Path: path.basename(mp4Path) };
+      } else if (videoResult) {
+        videoResult = { ...videoResult, mp4Ready: false };
+      }
+    } catch (e) {
+      if (videoResult) videoResult = { ...videoResult, mp4Ready: false };
+    }
+  }
+
+  return { title, price: priceDetail.total, priceDetail, bullets, images, video: videoResult, brand, dimensions, variants, url: productUrl };
 }
 
 // ==================== 路由 ====================
@@ -894,7 +969,26 @@ app.post('/api/download_all_images', async (req, res) => {
   await archive.finalize();
 });
 
-// 视频 m3u8 -> mp4
+// 预转换 mp4 下载接口 — scrape 时已转好，前端点下载直接走这里
+app.get('/api/video_download', (req, res) => {
+  const file = (req.query.file || '').trim();
+  if (!file || !file.startsWith('amz_vid_') || !file.endsWith('.mp4')) {
+    return res.status(400).json({ error: '无效的视频文件' });
+  }
+  const fullPath = path.join(TMP_DIR, file);
+  if (!fs.existsSync(fullPath)) {
+    return res.status(404).json({ error: '视频文件不存在（可能已过期，请重新采集）' });
+  }
+  res.download(fullPath, 'amazon_product_video.mp4', (err) => {
+    if (err) { /* download 出错就不管了 */ }
+    // 24 小时后清理 —— 用 setTimeout 延迟清理，避免下载刚发出去就删了
+    setTimeout(() => {
+      try { if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath); } catch (e) {}
+    }, 24 * 3600 * 1000);
+  });
+});
+
+// 视频 m3u8 -> mp4（后备接口，当预转换失败时使用）
 app.post('/api/video', async (req, res) => {
   const m3u8 = (req.body && req.body.url || '').trim();
   if (!m3u8 || !m3u8.includes('.m3u8')) {
@@ -1375,7 +1469,13 @@ function renderResult(d){
   const vidEl = document.getElementById('fVideo');
   if(d.video){
     vidEl.classList.remove('placeholder');
-    vidEl.innerHTML = '<div class="video-thumb"><video src="'+d.video.master+'" muted playsinline preload="metadata"></video></div><div class="video-info"><div class="vtitle">主图视频</div><div class="vmeta">点击下方按钮下载为 MP4 文件</div></div><button class="btn btn-primary" onclick="downloadVideo(\\''+d.video.stream720+'\\', this)">⬇ 下载视频</button>';
+    if(d.video.mp4Ready && d.video.mp4Path){
+      // 预转换成功 — 直接用后端已转好的 mp4 下载接口
+      vidEl.innerHTML = '<div class="video-thumb"><video src="'+d.video.master+'" muted playsinline preload="metadata"></video></div><div class="video-info"><div class="vtitle">主图视频</div><div class="vmeta">已为你转好 MP4，点击下方按钮直接保存</div></div><a class="btn btn-primary" href="/api/video_download?file='+encodeURIComponent(d.video.mp4Path)+'" download="amazon_product_video.mp4">⬇ 下载视频 (MP4)</a>';
+    } else {
+      // 预转换失败 — 走后备接口（用户点击时现转）
+      vidEl.innerHTML = '<div class="video-thumb"><video src="'+d.video.master+'" muted playsinline preload="metadata"></video></div><div class="video-info"><div class="vtitle">主图视频</div><div class="vmeta">正在转码，请稍候...</div></div><button class="btn btn-primary" onclick="downloadVideo(\\''+d.video.stream720+'\\', this)">⬇ 下载视频</button>';
+    }
   } else {
     vidEl.textContent = '暂无视频';
     vidEl.classList.add('placeholder');
