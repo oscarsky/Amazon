@@ -1124,16 +1124,13 @@ const INDEX_HTML = `<!DOCTYPE html>
   .dl-overlay span { color: #fff; font-size: 13px; font-weight: 600; }
   .video-card { display: flex; align-items: center; gap: 16px; padding: 14px; background: #f7f8fa; border-radius: 8px; margin-top: 16px; }
   .video-card.placeholder { color: #bbb; font-style: italic; justify-content: center; }
-  .sku-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 14px; }
-  .sku-grid.placeholder { color: #bbb; font-style: italic; display: flex; align-items: center; justify-content: center; min-height: 60px; }
-  .sku-item { display: flex; flex-direction: column; gap: 8px; }
-  .sku-item .sku-img { position: relative; border-radius: 8px; overflow: hidden; background: #f7f7f7; aspect-ratio: 1; cursor: pointer; transition: transform .15s; }
-  .sku-item .sku-img:hover { transform: translateY(-2px); }
-  .sku-item .sku-img img { width: 100%; height: 100%; object-fit: contain; }
-  .sku-item .sku-img .dl-overlay { position: absolute; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity .15s; }
-  .sku-item .sku-img:hover .dl-overlay { opacity: 1; }
-  .sku-item .sku-name { font-size: 13px; color: #444; text-align: center; word-break: break-word; line-height: 1.4; }
-  .sku-item .sku-name .copy-btn { display: block; width: 100%; margin-top: 4px; }
+  /* 尺寸选择方框（亚马逊风格） */
+  .sku-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+  .sku-grid.placeholder { color: #bbb; font-style: italic; display: flex; align-items: center; justify-content: center; min-height: 40px; }
+  .sku-chip { position: relative; padding: 10px 16px; border: 1px solid #d5d9d9; border-radius: 4px; background: #fff; cursor: pointer; font-size: 13px; color: #444; line-height: 1.3; text-align: center; max-width: 160px; transition: border-color .12s, box-shadow .12s, color .12s; user-select: none; }
+  .sku-chip:hover { border-color: #ff9900; box-shadow: 0 0 0 1px #ff9900; color: #000; }
+  .sku-chip.sku-chip-active { border-color: #ff9900; box-shadow: 0 0 0 1px #ff9900; color: #000; }
+  .sku-chip .sku-chip-price { font-size: 11px; color: #888; margin-top: 3px; }
   .video-thumb { width: 120px; height: 68px; background: #000; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 11px; flex-shrink: 0; overflow: hidden; }
   .video-thumb video { width: 100%; height: 100%; object-fit: cover; }
   .video-info { flex: 1; }
@@ -1237,10 +1234,10 @@ const INDEX_HTML = `<!DOCTYPE html>
     <div class="video-card placeholder" id="fVideo">暂无视频</div>
   </div>
 
-  <!-- 其他SKU图片 -->
+  <!-- 尺寸选择（亚马逊风格方框，hover/点击切换主图） -->
   <div class="card">
     <div class="media-header">
-      <div class="field-label">其他SKU图片 <span style="font-weight:normal;color:#aaa;font-size:12px;cursor:pointer;margin-left:12px"><label style="cursor:pointer"><input type="checkbox" id="selAllSku" checked onchange="toggleSelAllSku(this.checked)" style="margin-right:4px">全选 / 全不选</label></span></div>
+      <div class="field-label">尺寸 / 规格</div>
     </div>
     <div class="sku-grid placeholder" id="fSkuImages">等待采集...</div>
   </div>
@@ -1510,104 +1507,84 @@ function renderResult(d){
     vidEl.classList.add('placeholder');
   }
 
-  // 其他SKU图片
+  // 尺寸选择方框（亚马逊风格）— hover/点击切换主图
   const skuEl = document.getElementById('fSkuImages');
-  const selAllSku = document.getElementById('selAllSku');
+  window._skuVariants = d.variants || [];
   if(d.variants && d.variants.length){
     skuEl.classList.remove('placeholder');
     let html = '';
     d.variants.forEach((v,i)=>{
       const safeName = escapeHtml(v.name);
-      const dataText = safeName.replace(/"/g,'&quot;');
-      html += '<div class="sku-item">';
-      if(v.image){
-        const dl = '/api/proxy_image?url=' + encodeURIComponent(v.image);
-        html += '<div style="position:relative;display:inline-block">';
-        html += '<a class="sku-img" href="'+dl+'" download><img src="'+v.image+'" alt="'+safeName+'" loading="lazy" onerror="this.style.opacity=.3"><div class="dl-overlay"><span>⬇ 下载</span></div></a>';
-        html += '<input type="checkbox" class="sku-img-sel" data-src="'+v.image+'" checked onchange="updateSelBtn()" style="position:absolute;top:6px;left:6px;z-index:10;width:16px;height:16px;cursor:pointer">';
-        html += '</div>';
-      } else {
-        html += '<div class="sku-img" style="display:flex;align-items:center;justify-content:center;background:#f0f0f0;color:#999;font-size:13px;">无图片</div>';
-      }
-      html += '<div class="sku-name">'+safeName+'<button class="copy-btn" data-text="'+dataText+'">📋 复制</button></div>';
+      html += '<div class="sku-chip" data-img="'+(v.image?escapeHtml(v.image):'')+'" data-idx="'+i+'" title="切换到此尺寸对应图片">';
+      html += safeName;
       html += '</div>';
     });
     skuEl.innerHTML = html;
-    if (selAllSku) selAllSku.checked = true;
+    // 事件委托：hover 切换主图，离开时回到默认主图（或保持最后一次）
+    skuEl.addEventListener('mouseover', function(e){
+      const chip = e.target.closest('.sku-chip');
+      if(!chip) return;
+      const img = chip.dataset.img;
+      if(img) setMainImage(img);
+      this.querySelectorAll('.sku-chip-active').forEach(el=>el.classList.remove('sku-chip-active'));
+      chip.classList.add('sku-chip-active');
+    });
+    skuEl.addEventListener('mouseleave', function(){
+      this.querySelectorAll('.sku-chip-active').forEach(el=>el.classList.remove('sku-chip-active'));
+    });
   } else {
-    skuEl.textContent = '该商品无其他SKU变体';
+    skuEl.textContent = '该商品无其他尺寸/规格';
     skuEl.classList.add('placeholder');
-    if (selAllSku) selAllSku.checked = false;
   }
 }
 
-// 一键下载全部图片（主图 + 所有有图的 SKU，去重）
+// 把主图第一张（第一张 media-item 的 <img>）替换成指定 URL；同时更新 currentImages[0]
+function setMainImage(url){
+  if(!url) return;
+  const firstImg = document.querySelector('#fImages .media-item img');
+  if(firstImg){
+    firstImg.src = url;
+  }
+  const firstA = document.querySelector('#fImages .media-item-wrap:first-child a');
+  if(firstA){
+    firstA.href = '/api/proxy_image?url=' + encodeURIComponent(url);
+  }
+  if(currentImages && currentImages.length){
+    currentImages[0] = url;
+  }
+}
+
+// 一键下载全部图片（主图全集，已包含 active 尺寸的主图切换效果）
 async function downloadAllImages(){
   const main = currentImages.slice();
-  const skuUrls = [];
-  document.querySelectorAll('.sku-img-sel').forEach(c => { if(c.dataset.src) skuUrls.push(c.dataset.src); });
-  const seen = new Set();
-  const all = [];
-  for (const u of [...main, ...skuUrls]) {
-    const m = u.match(/\\/images\\/I\\/([A-Za-z0-9+\\-]+)\\._/);
-    const id = m ? m[1] : u;
-    if (!seen.has(id)) { seen.add(id); all.push(u); }
-  }
-  await downloadImageList(all, document.getElementById('dlAllBtn'));
+  await downloadImageList(main, document.getElementById('dlAllBtn'));
 }
 
-// ============ 勾选下载 ============
-// 主图勾选
+// ============ 勾选下载（仅主图） ============
 function getSelectedMainImages(){
   const checks = document.querySelectorAll('.img-sel');
   const urls = [];
   checks.forEach(c => { if(c.checked){ const idx = parseInt(c.dataset.idx,10); if(!isNaN(idx) && currentImages[idx]) urls.push(currentImages[idx]); } });
   return urls;
 }
-// SKU 勾选
-function getSelectedSkuImages(){
-  const checks = document.querySelectorAll('.sku-img-sel');
-  const urls = [];
-  checks.forEach(c => { if(c.checked && c.dataset.src) urls.push(c.dataset.src); });
-  return urls;
-}
-// 合并勾选（主图 + SKU，去重）
+// 合并勾选（仅主图，SKU 尺寸切换已不再作为独立勾选源）
 function getSelectedImages(){
-  const main = getSelectedMainImages();
-  const sku = getSelectedSkuImages();
-  const seen = new Set();
-  const merged = [];
-  for (const u of [...main, ...sku]) {
-    const m = u.match(/\\/images\\/I\\/([A-Za-z0-9+\\-]+)\\._/);
-    const id = m ? m[1] : u;
-    if (!seen.has(id)) { seen.add(id); merged.push(u); }
-  }
-  return merged;
+  return getSelectedMainImages();
 }
 function toggleSelAll(checked){
   document.querySelectorAll('.img-sel').forEach(c => c.checked = checked);
   const cb = document.getElementById('selAll'); if(cb) cb.checked = checked;
   updateSelBtn();
 }
-function toggleSelAllSku(checked){
-  document.querySelectorAll('.sku-img-sel').forEach(c => c.checked = checked);
-  const cb = document.getElementById('selAllSku'); if(cb) cb.checked = checked;
-  updateSelBtn();
-}
 function updateSelBtn(){
   const mainAll = document.querySelectorAll('.img-sel').length;
   const mainSel = document.querySelectorAll('.img-sel:checked').length;
-  const skuAll = document.querySelectorAll('.sku-img-sel').length;
-  const skuSel = document.querySelectorAll('.sku-img-sel:checked').length;
-  const totalSel = mainSel + skuSel;
   const btn = document.getElementById('dlSelBtn');
   if(!btn) return;
-  btn.style.display = (mainAll + skuAll > 0) ? 'inline-flex' : 'none';
-  btn.textContent = '⬇ 下载选中 (' + totalSel + ')';
+  btn.style.display = mainAll > 0 ? 'inline-flex' : 'none';
+  btn.textContent = '⬇ 下载选中 (' + mainSel + ')';
   const selAll = document.getElementById('selAll');
   if(selAll && mainAll > 0) selAll.checked = mainSel === mainAll;
-  const selAllSku = document.getElementById('selAllSku');
-  if(selAllSku && skuAll > 0) selAllSku.checked = skuSel === skuAll;
 }
 
 // 通用下载一组图片（抽取 downloadAllImages 逻辑）
