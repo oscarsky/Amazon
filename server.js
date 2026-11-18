@@ -234,23 +234,22 @@ function parseBrand($) {
 }
 
 /**
- * 解析商品尺寸/规格信息（优先返回变体规格，如 "1.38 Ounce (Pack of 50)"）
+ * 解析商品尺寸/规格信息（优先返回变体规格，保留英文原文如 "1.38 Ounce (Pack of 50)"）
  */
 function parseDimensions($) {
   // 1. 优先返回当前选中的变体规格（如 "1.38 Ounce (Pack of 50)"）
   const selected = parseSelectedVariant($);
   if (selected) return selected;
 
-  // 2. 从标题中提取规格信息（如 "1.4 盎司。50 支装"）
+  // 2. 从标题中提取规格信息
   const titleEl = $('#productTitle');
-  const titleText = cleanText(t2s(titleEl.text().trim()));
-  // 匹配 "数字+单位" 如 1.4盎司、50支装、69盎司 等
-  const specMatch = titleText.match(/(\d+\.?\d*)\s*(盎司|毫升|克|千克|英镑|磅|瓶|罐|袋|盒|支|条|片|粒|件|装)/g);
+  const titleText = cleanText(titleEl.text().trim());
+  const specMatch = titleText.match(/(\d+\.?\d*)\s*(Ounce|Ounces|oz|ml|mL|gram|grams|pound|pounds|lb|lbs|bottle|bottles|jar|jars|bag|bags|box|boxes|can|cans|pack|packs|count|ct)/gi);
   if (specMatch && specMatch.length) {
     return specMatch.join(' ');
   }
 
-  // 3. 兜底：Item Weight / 商品重量
+  // 3. 兜底：Item Weight
   const itemWeight = parseDetailRow($, ['Item Weight', '商品重量', '物品重量', '產品重量']);
   if (itemWeight) return itemWeight;
 
@@ -262,34 +261,34 @@ function parseDimensions($) {
 }
 
 /**
- * 解析当前选中的变体名称
+ * 解析当前选中的变体名称（保留英文原文）
  */
 function parseSelectedVariant($) {
   // 1. 遍历所有 a-button-selected 内的图片，找第一个有 alt 的
   const selImgs = $('.a-button-selected img').toArray();
   for (const el of selImgs) {
     const alt = cleanText($(el).attr('alt') || '');
-    if (alt) return translateVariant(alt);
+    if (alt) return alt;
   }
   // 2. aria-pressed=true 的按钮
   const pressed = $('[aria-pressed="true"] img').toArray();
   for (const el of pressed) {
     const alt = cleanText($(el).attr('alt') || '');
-    if (alt) return translateVariant(alt);
+    if (alt) return alt;
   }
   // 3. 下拉选择框中选中的 option
   const selSelects = $('select#variation_size_name option:checked, select[name*="size_name"] option:checked, select[name*="variation"] option:checked').toArray();
   for (const el of selSelects) {
     const txt = cleanText($(el).text());
     if (txt && txt !== '--选择--' && txt !== '--Select--' && !/请选择|Select/i.test(txt)) {
-      return translateVariant(txt);
+      return txt;
     }
   }
   // 4. 遍历所有 a-button-selected，找第一个有有效文本的
   const selBtns = $('.a-button-selected').toArray();
   for (const el of selBtns) {
     const txt = cleanText($(el).text());
-    if (txt && txt.length > 0 && txt.length < 80) return translateVariant(txt);
+    if (txt && txt.length > 0 && txt.length < 80) return txt;
   }
   return null;
 }
@@ -350,6 +349,38 @@ function translateVariant(name) {
 }
 
 /**
+ * 从页面 HTML 中解析 colorImages，返回变体名称 -> 高清图片URL 的映射
+ */
+function parseColorImages(html) {
+  const map = {};
+  const key = '"colorImages":';
+  const start = html.indexOf(key);
+  if (start < 0) return map;
+  const objStart = html.indexOf('{', start + key.length);
+  if (objStart < 0) return map;
+  // 手动匹配平衡的花括号
+  let depth = 0;
+  let end = -1;
+  for (let i = objStart; i < html.length; i++) {
+    if (html[i] === '{') depth++;
+    else if (html[i] === '}') {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  if (end < 0) return map;
+  try {
+    const colorImages = JSON.parse(html.slice(objStart, end + 1));
+    for (const [variantName, imgs] of Object.entries(colorImages)) {
+      if (Array.isArray(imgs) && imgs[0] && imgs[0].hiRes) {
+        map[variantName] = imgs[0].hiRes;
+      }
+    }
+  } catch (e) { /* ignore parse error */ }
+  return map;
+}
+
+/**
  * 解析所有SKU变体（名称 + 图片）
  */
 function parseVariants($) {
@@ -381,7 +412,7 @@ function parseVariants($) {
       if (seen.has(alt)) return;
       seen.add(alt);
       variants.push({
-        name: translateVariant(alt),
+        name: alt,
         image: `https://m.media-amazon.com/images/I/${bid}._SL1500_.jpg`,
       });
     });
@@ -421,7 +452,7 @@ function parseVariants($) {
           if (m) img = `https://m.media-amazon.com/images/I/${m[1]}._SL1500_.jpg`;
         }
         seen.add(txt);
-        variants.push({ name: translateVariant(txt), image: img });
+        variants.push({ name: txt, image: img });
       });
     });
   }
@@ -433,7 +464,7 @@ function parseVariants($) {
       if (!txt || /请选择|Select|--/i.test(txt)) return;
       if (seen.has(txt)) return;
       seen.add(txt);
-      variants.push({ name: translateVariant(txt), image: '' });
+      variants.push({ name: txt, image: '' });
     });
   }
 
@@ -509,11 +540,29 @@ async function scrape(productUrl) {
   const video = parseVideo(html);
   const brand = parseBrand($);
   const dimensions = parseDimensions($);
-  const variants = parseVariants($);
 
-  // 无图片的文本变体，用主图第一张作为占位
+  // 从 colorImages 中获取变体名称 -> 高清图片映射（名称为英文原文）
+  const colorImages = parseColorImages(html);
   const fallbackImg = (images && images[0]) ? images[0] : '';
-  variants.forEach(v => { if (!v.image) v.image = fallbackImg; });
+
+  // 优先用 colorImages 构建变体列表（英文名 + 对应高清图），
+  // 排除当前选中的变体（已作为 dimensions 展示）
+  let variants = [];
+  const seen = new Set();
+  for (const [name, img] of Object.entries(colorImages)) {
+    if (dimensions && (name === dimensions || name.toLowerCase() === String(dimensions).toLowerCase())) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    variants.push({ name, image: img || fallbackImg });
+  }
+
+  // 兜底：colorImages 没有数据时，回退到 parseVariants
+  if (variants.length === 0) {
+    variants = parseVariants($);
+    variants.forEach(v => {
+      if (!v.image) v.image = colorImages[v.name] || fallbackImg;
+    });
+  }
 
   return { title, price: priceDetail.total, priceDetail, bullets, images, video, brand, dimensions, variants, url: productUrl };
 }
