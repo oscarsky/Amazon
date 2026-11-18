@@ -1491,6 +1491,7 @@ async function downloadImageList(urls, btn){
     try{
       const dirHandle = await window.showDirectoryPicker();
       let success = 0;
+      const usedNames = new Set();
       for(let i = 0; i < urls.length; i++){
         btn.innerHTML = '<span class="spinner"></span> 保存中 ' + (i+1) + '/' + urls.length;
         try{
@@ -1499,8 +1500,15 @@ async function downloadImageList(urls, btn){
           const resp = await fetch(dlUrl);
           if(!resp.ok) continue;
           const blob = await resp.blob();
-          const ext = (src.match(/\.(jpg|jpeg|png|webp)/i) || ['jpg'])[1];
-          const fileName = 'image_' + String(i+1).padStart(2,'0') + '.' + ext;
+          // 从 URL path 取默认文件名，保持原名
+          let fileName = (() => { try { return decodeURIComponent(new URL(src).pathname.split('/').pop() || ''); } catch(e){ return ''; } })();
+          if(!fileName) fileName = 'image.' + ((src.match(/\.(jpg|jpeg|png|webp)/i) || ['jpg'])[1]);
+          // 同名去重
+          if(usedNames.has(fileName)){
+            const m = fileName.match(/^(.+?)(\.[^.]+)$/);
+            if(m){ let n = 1; let cand = m[1] + '_' + n + m[2]; while(usedNames.has(cand)) cand = m[1] + '_' + (++n) + m[2]; fileName = cand; }
+          }
+          usedNames.add(fileName);
           const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
           const writable = await fileHandle.createWritable();
           await writable.write(blob);
@@ -1518,6 +1526,7 @@ async function downloadImageList(urls, btn){
   }
 
   let success = 0;
+  const usedNames = new Set();
   for(let i = 0; i < urls.length; i++){
     btn.innerHTML = '<span class="spinner"></span> 下载中 ' + (i+1) + '/' + urls.length;
     try{
@@ -1526,10 +1535,18 @@ async function downloadImageList(urls, btn){
       const resp = await fetch(dlUrl);
       if(!resp.ok) continue;
       const blob = await resp.blob();
-      const ext = (src.match(/\.(jpg|jpeg|png|webp)/i) || ['jpg'])[1];
+      // 从 URL path 取默认文件名，保持原名
+      let fileName = (() => { try { return decodeURIComponent(new URL(src).pathname.split('/').pop() || ''); } catch(e){ return ''; } })();
+      if(!fileName) fileName = 'image.' + ((src.match(/\.(jpg|jpeg|png|webp)/i) || ['jpg'])[1]);
+      // 同名去重
+      if(usedNames.has(fileName)){
+        const m = fileName.match(/^(.+?)(\.[^.]+)$/);
+        if(m){ let n = 1; let cand = m[1] + '_' + n + m[2]; while(usedNames.has(cand)) cand = m[1] + '_' + (++n) + m[2]; fileName = cand; }
+      }
+      usedNames.add(fileName);
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = 'image_' + String(i+1).padStart(2,'0') + '.' + ext;
+      a.download = fileName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
