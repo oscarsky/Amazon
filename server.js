@@ -409,32 +409,13 @@ async function scrape(productUrl) {
   const sku = parseSku($);
   const variants = parseVariants($);
 
-  // 调试：检查 AmazonGlobal 上下文
-  let amazonGlobalContext = '';
-  const agIdx = html.indexOf('AmazonGlobal');
-  if (agIdx >= 0) {
-    amazonGlobalContext = html.slice(Math.max(0, agIdx - 200), agIdx + 300).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-  }
-  const hasCNY = html.includes('CNY') || html.includes('¥') || html.includes('￥');
-  const hasUSD = html.includes('$');
-  return { title, price: priceDetail.total, priceDetail, bullets, images, video, brand, sku, variants, url: productUrl, debug: { hasAmazonGlobal: agIdx >= 0, hasDelivery: html.includes('配送') || html.includes('遞送') || html.includes('運送'), hasTotal: html.includes('總計') || html.includes('总计'), hasCNY, hasUSD, amazonGlobalContext, priceDetail } };
+  return { title, price: priceDetail.total, priceDetail, bullets, images, video, brand, sku, variants, url: productUrl };
 }
 
 // ==================== 路由 ====================
 
 app.get('/', (req, res) => {
   res.type('html').send(INDEX_HTML);
-});
-
-// 调试：检查服务器出口IP区域
-app.get('/api/debug_ip', async (req, res) => {
-  try {
-    const r = await axios.get('https://checkip.amazonaws.com/', { timeout: 10000 });
-    const ip = (r.data || '').trim();
-    res.json({ ip });
-  } catch (e) {
-    res.json({ error: e.message });
-  }
 });
 
 app.post('/api/scrape', async (req, res) => {
@@ -851,14 +832,15 @@ function failProgress(msg){
   link.href = url || '#';
 
   // 判断是否为验证码相关错误
-  const isCaptcha = /验证码|validateCaptcha|status=200/i.test(msg || '');
+  const isCaptcha = /验证码|validateCaptcha|status=200|timeout/i.test(msg || '');
   if(isCaptcha){
     title.textContent = '🛡️ 亚马逊触发了人机验证';
-    desc.innerHTML = '这是亚马逊的反爬机制，并非工具故障。服务器已自动重试多次仍被拦截。<br>' +
-      '建议按以下方式解决：<br>' +
-      '1. 等待 <b>10~30 秒</b> 后点击「重新采集」；<br>' +
-      '2. 或点击「打开商品页手动验证」，在新标签页中完成亚马逊验证码，然后回到本页重新采集。<br>' +
-      '<span style="color:#888;font-size:12px">提示：频繁采集同一商品更容易触发验证，请适当间隔。</span>';
+    desc.innerHTML = '这是亚马逊的反爬机制，并非工具故障。<br>' +
+      '建议按以下方式解决（任选其一）：<br>' +
+      '1. 点击「打开商品页」，在新标签页中<b>登录你的亚马逊账户</b>并完成验证码，然后回到本页点击「重新采集」；<br>' +
+      '2. 若未登录账户，可在亚马逊页面完成人机验证后再回来重试；<br>' +
+      '3. 也可以等待 <b>30~60 秒</b> 后直接点击「重新采集」。<br>' +
+      '<span style="color:#888;font-size:12px">提示：登录账户后采集成功率更高，频繁采集同一商品也容易触发验证。</span>';
   } else {
     title.textContent = '采集失败';
     desc.textContent = msg || '未知错误，请检查链接是否正确后重试。';
