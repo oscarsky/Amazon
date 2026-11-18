@@ -349,35 +349,84 @@ function translateVariant(name) {
 }
 
 /**
- * 从页面 HTML 中解析 colorImages，返回变体名称 -> 高清图片URL 的映射
+ * 提取页面中某个 JSON 对象（按平衡花括号匹配）
+ */
+function extractJsonObject(html, key) {
+  const start = html.indexOf(key);
+  if (start < 0) return null;
+  const objStart = html.indexOf('{', start + key.length);
+  if (objStart < 0) return null;
+  let depth = 0, end = -1;
+  for (let i = objStart; i < html.length; i++) {
+    if (html[i] === '{') depth++;
+    else if (html[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end < 0) return null;
+  try { return JSON.parse(html.slice(objStart, end + 1)); } catch (e) { return null; }
+}
+
+/**
+ * 提取页面中某个 JSON 数组（按平衡方括号匹配）
+ */
+function extractJsonArray(html, key) {
+  const start = html.indexOf(key);
+  if (start < 0) return null;
+  const arrStart = html.indexOf('[', start + key.length);
+  if (arrStart < 0) return null;
+  let depth = 0, end = -1;
+  for (let i = arrStart; i < html.length; i++) {
+    if (html[i] === '[') depth++;
+    else if (html[i] === ']') { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end < 0) return null;
+  try { return JSON.parse(html.slice(arrStart, end + 1)); } catch (e) { return null; }
+}
+
+/**
+ * 从页面 HTML 中解析 colorImages，返回变体名称 -> 高清图片URL数组 的映射
+ * 每个变体可能有多张图，全部收集
  */
 function parseColorImages(html) {
   const map = {};
-  const key = '"colorImages":';
-  const start = html.indexOf(key);
-  if (start < 0) return map;
-  const objStart = html.indexOf('{', start + key.length);
-  if (objStart < 0) return map;
-  // 手动匹配平衡的花括号
-  let depth = 0;
-  let end = -1;
-  for (let i = objStart; i < html.length; i++) {
-    if (html[i] === '{') depth++;
-    else if (html[i] === '}') {
-      depth--;
-      if (depth === 0) { end = i; break; }
+  const colorImages = extractJsonObject(html, '"colorImages":');
+  if (!colorImages) return map;
+  for (const [variantName, imgs] of Object.entries(colorImages)) {
+    if (!Array.isArray(imgs)) continue;
+    const urls = [];
+    for (const img of imgs) {
+      if (img && img.hiRes) urls.push(img.hiRes);
+    }
+    if (urls.length) map[variantName] = urls;
+  }
+  return map;
+}
+
+/**
+ * 从 imageGalleryData 中提取画廊全部高清原图
+ */
+function parseImageGalleryData(html) {
+  const urls = [];
+  const gallery = extractJsonArray(html, "'imageGalleryData':") || extractJsonArray(html, '"imageGalleryData":');
+  if (Array.isArray(gallery)) {
+    for (const item of gallery) {
+      if (item && item.hiRes) urls.push(item.hiRes);
     }
   }
-  if (end < 0) return map;
-  try {
-    const colorImages = JSON.parse(html.slice(objStart, end + 1));
-    for (const [variantName, imgs] of Object.entries(colorImages)) {
-      if (Array.isArray(imgs) && imgs[0] && imgs[0].hiRes) {
-        map[variantName] = imgs[0].hiRes;
-      }
-    }
-  } catch (e) { /* ignore parse error */ }
-  return map;
+  return urls;
+}
+
+/**
+ * 从整个 HTML 中正则提取所有 hiRes 高清原图 URL
+ * 覆盖 colorImages / imageGalleryData / 其他内联数据中的全部 hiRes 字段
+ */
+function parseAllHiResImages(html) {
+  const urls = [];
+  const re = /"hiRes"\s*:\s*"(https?:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/g;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    urls.push(m[1].replace(/\\\//g, '/'));
+  }
+  return urls;
 }
 
 /**
@@ -536,31 +585,84 @@ async function scrape(productUrl) {
     if (txt && !txt.startsWith('查看')) bullets.push(txt);
   });
 
-  const images = parseImages($);
   const video = parseVideo(html);
   const brand = parseBrand($);
   const dimensions = parseDimensions($);
 
-  // 从 colorImages 中获取变体名称 -> 高清图片映射（名称为英文原文）
+  // 从 colorImages 中获取变体名称 -> 高清图片数组 的映射（名称为英文原文）
   const colorImages = parseColorImages(html);
+
+  // 主图：只采集当前选中变体的画廊高清原图，避免混入其他变体的图
+  // 1) colorImages 中选中变体的全部 hiRes 图
+  // 2) #altImages 缩略图对应的 SL1500 高清（选中变体的画廊）
+  // 3) 全 HTML 中 hiRes 字段里 ID 与上述一致的高清图（取最高清版本）
+  // 4) landingImage 最大尺寸图（兜底）
+  const galleryImgs = [];
+  const seenImgIds = new Set();
+  const addImg = (url) => {
+    if (!url) return;
+    const m = url.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+    const id = m ? m[1] : url;
+    if (seenImgIds.has(id)) return;
+    seenImgIds.add(id);
+    galleryImgs.push(url);
+  };
+  // 收集选中变体的图片 ID 白名单
+  const selectedImgIds = new Set();
+  let selectedImgs = dimensions && colorImages[dimensions] ? colorImages[dimensions] : null;
+  if (!selectedImgs && dimensions) {
+    const dimLower = String(dimensions).toLowerCase();
+    for (const [name, urls] of Object.entries(colorImages)) {
+      if (name.toLowerCase() === dimLower) { selectedImgs = urls; break; }
+    }
+  }
+  if (selectedImgs) {
+    selectedImgs.forEach(u => {
+      const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+      if (m) selectedImgIds.add(m[1]);
+    });
+  }
+  // altImages 缩略图 ID 也加入白名单
+  const altImgIds = [];
+  $('#altImages img').each((_, el) => {
+    const src = $(el).attr('src') || '';
+    const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+    if (m) { selectedImgIds.add(m[1]); altImgIds.push(m[1]); }
+  });
+  // 1. 先加 colorImages 选中变体的 hiRes
+  if (selectedImgs) selectedImgs.forEach(addImg);
+  // 2. 从全 HTML hiRes 中找白名单内 ID 的高清图（覆盖 imageGalleryData 等）
+  for (const u of parseAllHiResImages(html)) {
+    const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+    if (m && selectedImgIds.has(m[1])) addImg(u);
+  }
+  // 3. altImages 缩略图转 SL1500 兜底（防止 hiRes 中遗漏）
+  for (const bid of altImgIds) addImg(`https://m.media-amazon.com/images/I/${bid}._SL1500_.jpg`);
+  // 4. landingImage 兜底
+  if (galleryImgs.length === 0) parseImages($).forEach(addImg);
+
+  const images = galleryImgs;
   const fallbackImg = (images && images[0]) ? images[0] : '';
 
-  // 优先用 colorImages 构建变体列表（英文名 + 对应高清图），
+  // 优先用 colorImages 构建变体列表（英文名 + 对应首张高清图），
   // 排除当前选中的变体（已作为 dimensions 展示）
   let variants = [];
   const seen = new Set();
-  for (const [name, img] of Object.entries(colorImages)) {
+  for (const [name, urls] of Object.entries(colorImages)) {
     if (dimensions && (name === dimensions || name.toLowerCase() === String(dimensions).toLowerCase())) continue;
     if (seen.has(name)) continue;
     seen.add(name);
-    variants.push({ name, image: img || fallbackImg });
+    variants.push({ name, image: (urls && urls[0]) || fallbackImg });
   }
 
   // 兜底：colorImages 没有数据时，回退到 parseVariants
   if (variants.length === 0) {
     variants = parseVariants($);
     variants.forEach(v => {
-      if (!v.image) v.image = colorImages[v.name] || fallbackImg;
+      if (!v.image) {
+        const cu = colorImages[v.name];
+        v.image = (cu && cu[0]) || fallbackImg;
+      }
     });
   }
 
