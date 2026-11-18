@@ -592,11 +592,8 @@ async function scrape(productUrl) {
   // 从 colorImages 中获取变体名称 -> 高清图片数组 的映射（名称为英文原文）
   const colorImages = parseColorImages(html);
 
-  // 主图：只采集当前选中变体的画廊高清原图，避免混入其他变体的图
-  // 1) colorImages 中选中变体的全部 hiRes 图
-  // 2) #altImages 缩略图对应的 SL1500 高清（选中变体的画廊）
-  // 3) 全 HTML 中 hiRes 字段里 ID 与上述一致的高清图（取最高清版本）
-  // 4) landingImage 最大尺寸图（兜底）
+  // 主图：采集"查看完整视图"画廊中的全部高清原图
+  // 优先取 colorImages 中选中变体的图（保证主图在前），再合并全页面所有 hiRes 图去重
   const galleryImgs = [];
   const seenImgIds = new Set();
   const addImg = (url) => {
@@ -607,8 +604,7 @@ async function scrape(productUrl) {
     seenImgIds.add(id);
     galleryImgs.push(url);
   };
-  // 收集选中变体的图片 ID 白名单
-  const selectedImgIds = new Set();
+  // 1. 选中变体的 colorImages 图排在最前
   let selectedImgs = dimensions && colorImages[dimensions] ? colorImages[dimensions] : null;
   if (!selectedImgs && dimensions) {
     const dimLower = String(dimensions).toLowerCase();
@@ -616,29 +612,16 @@ async function scrape(productUrl) {
       if (name.toLowerCase() === dimLower) { selectedImgs = urls; break; }
     }
   }
-  if (selectedImgs) {
-    selectedImgs.forEach(u => {
-      const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-      if (m) selectedImgIds.add(m[1]);
-    });
-  }
-  // altImages 缩略图 ID 也加入白名单
-  const altImgIds = [];
+  if (selectedImgs) selectedImgs.forEach(addImg);
+  // 2. 全页面所有 hiRes 高清原图（覆盖 imageGalleryData / colorImages 等全部内联数据）
+  parseAllHiResImages(html).forEach(addImg);
+  // 3. altImages 缩略图转 SL1500 兜底
   $('#altImages img').each((_, el) => {
     const src = $(el).attr('src') || '';
     const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-    if (m) { selectedImgIds.add(m[1]); altImgIds.push(m[1]); }
+    if (m) addImg(`https://m.media-amazon.com/images/I/${m[1]}._SL1500_.jpg`);
   });
-  // 1. 先加 colorImages 选中变体的 hiRes
-  if (selectedImgs) selectedImgs.forEach(addImg);
-  // 2. 从全 HTML hiRes 中找白名单内 ID 的高清图（覆盖 imageGalleryData 等）
-  for (const u of parseAllHiResImages(html)) {
-    const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-    if (m && selectedImgIds.has(m[1])) addImg(u);
-  }
-  // 3. altImages 缩略图转 SL1500 兜底（防止 hiRes 中遗漏）
-  for (const bid of altImgIds) addImg(`https://m.media-amazon.com/images/I/${bid}._SL1500_.jpg`);
-  // 4. landingImage 兜底
+  // 4. landingImage 最大尺寸兜底
   if (galleryImgs.length === 0) parseImages($).forEach(addImg);
 
   const images = galleryImgs;
