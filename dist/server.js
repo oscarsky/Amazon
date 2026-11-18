@@ -1577,7 +1577,7 @@ function renderResult(d){
       html += '<div class="sku-chip" data-img="'+(v.image?escapeHtml(v.image):'')+'" data-idx="'+i+'">';
       // 缩略图
       if (v.image) {
-        html += '<div class="sku-thumb"><img src="'+v.image+'" alt="'+safeName+'" loading="lazy" onerror="this.style.display=\'none\'"></div>';
+        html += '<div class="sku-thumb"><img src="'+v.image+'" alt="'+safeName+'" loading="lazy" onerror="this.remove()"></div>';
       } else {
         html += '<div class="sku-thumb"><span class="sku-thumb-empty">无图</span></div>';
       }
