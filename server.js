@@ -1117,7 +1117,9 @@ const INDEX_HTML = `<!DOCTYPE html>
 
   <!-- 其他SKU图片 -->
   <div class="card">
-    <div class="field-label">其他SKU图片 <span style="font-weight:normal;color:#aaa;font-size:12px">（每个SKU图片可单独下载，下方文字可复制）</span></div>
+    <div class="media-header">
+      <div class="field-label">其他SKU图片 <span style="font-weight:normal;color:#aaa;font-size:12px;cursor:pointer;margin-left:12px"><label style="cursor:pointer"><input type="checkbox" id="selAllSku" checked onchange="toggleSelAllSku(this.checked)" style="margin-right:4px">全选 / 全不选</label></span></div>
+    </div>
     <div class="sku-grid placeholder" id="fSkuImages">等待采集...</div>
   </div>
 </div>
@@ -1382,6 +1384,7 @@ function renderResult(d){
 
   // 其他SKU图片
   const skuEl = document.getElementById('fSkuImages');
+  const selAllSku = document.getElementById('selAllSku');
   if(d.variants && d.variants.length){
     skuEl.classList.remove('placeholder');
     let html = '';
@@ -1391,7 +1394,10 @@ function renderResult(d){
       html += '<div class="sku-item">';
       if(v.image){
         const dl = '/api/proxy_image?url=' + encodeURIComponent(v.image);
+        html += '<div style="position:relative;display:inline-block">';
         html += '<a class="sku-img" href="'+dl+'" download><img src="'+v.image+'" alt="'+safeName+'" loading="lazy" onerror="this.style.opacity=.3"><div class="dl-overlay"><span>⬇ 下载</span></div></a>';
+        html += '<input type="checkbox" class="sku-img-sel" data-src="'+v.image+'" checked onchange="updateSelBtn()" style="position:absolute;top:6px;left:6px;z-index:10;width:16px;height:16px;cursor:pointer">';
+        html += '</div>';
       } else {
         html += '<div class="sku-img" style="display:flex;align-items:center;justify-content:center;background:#f0f0f0;color:#999;font-size:13px;">无图片</div>';
       }
@@ -1399,34 +1405,81 @@ function renderResult(d){
       html += '</div>';
     });
     skuEl.innerHTML = html;
+    if (selAllSku) selAllSku.checked = true;
   } else {
     skuEl.textContent = '该商品无其他SKU变体';
     skuEl.classList.add('placeholder');
+    if (selAllSku) selAllSku.checked = false;
   }
 }
 
-// 一键下载全部图片（统一走 downloadImageList）
+// 一键下载全部图片（主图 + 所有有图的 SKU，去重）
 async function downloadAllImages(){
-  await downloadImageList(currentImages, document.getElementById('dlAllBtn'));
+  const main = currentImages.slice();
+  const skuUrls = [];
+  document.querySelectorAll('.sku-img-sel').forEach(c => { if(c.dataset.src) skuUrls.push(c.dataset.src); });
+  const seen = new Set();
+  const all = [];
+  for (const u of [...main, ...skuUrls]) {
+    const m = u.match(/\\/images\\/I\\/([A-Za-z0-9+\\-]+)\\._/);
+    const id = m ? m[1] : u;
+    if (!seen.has(id)) { seen.add(id); all.push(u); }
+  }
+  await downloadImageList(all, document.getElementById('dlAllBtn'));
 }
 
 // ============ 勾选下载 ============
-function getSelectedImages(){
+// 主图勾选
+function getSelectedMainImages(){
   const checks = document.querySelectorAll('.img-sel');
   const urls = [];
   checks.forEach(c => { if(c.checked){ const idx = parseInt(c.dataset.idx,10); if(!isNaN(idx) && currentImages[idx]) urls.push(currentImages[idx]); } });
   return urls;
 }
+// SKU 勾选
+function getSelectedSkuImages(){
+  const checks = document.querySelectorAll('.sku-img-sel');
+  const urls = [];
+  checks.forEach(c => { if(c.checked && c.dataset.src) urls.push(c.dataset.src); });
+  return urls;
+}
+// 合并勾选（主图 + SKU，去重）
+function getSelectedImages(){
+  const main = getSelectedMainImages();
+  const sku = getSelectedSkuImages();
+  const seen = new Set();
+  const merged = [];
+  for (const u of [...main, ...sku]) {
+    const m = u.match(/\\/images\\/I\\/([A-Za-z0-9+\\-]+)\\._/);
+    const id = m ? m[1] : u;
+    if (!seen.has(id)) { seen.add(id); merged.push(u); }
+  }
+  return merged;
+}
 function toggleSelAll(checked){
   document.querySelectorAll('.img-sel').forEach(c => c.checked = checked);
+  const cb = document.getElementById('selAll'); if(cb) cb.checked = checked;
+  updateSelBtn();
+}
+function toggleSelAllSku(checked){
+  document.querySelectorAll('.sku-img-sel').forEach(c => c.checked = checked);
+  const cb = document.getElementById('selAllSku'); if(cb) cb.checked = checked;
   updateSelBtn();
 }
 function updateSelBtn(){
-  const sel = getSelectedImages();
+  const mainAll = document.querySelectorAll('.img-sel').length;
+  const mainSel = document.querySelectorAll('.img-sel:checked').length;
+  const skuAll = document.querySelectorAll('.sku-img-sel').length;
+  const skuSel = document.querySelectorAll('.sku-img-sel:checked').length;
+  const totalSel = mainSel + skuSel;
   const btn = document.getElementById('dlSelBtn');
   if(!btn) return;
-  btn.textContent = '⬇ 下载选中 (' + sel.length + ')';
-  document.getElementById('selAll').checked = sel.length === currentImages.length;
+  btn.style.display = (mainAll + skuAll > 0) ? 'inline-flex' : 'none';
+  btn.textContent = '⬇ 下载选中 (' + totalSel + ')';
+  const selAll = document.getElementById('selAll');
+  if(selAll && mainAll > 0) selAll.checked = mainSel === mainAll;
+  const selAllSku = document.getElementById('selAllSku');
+  if(selAllSku && skuAll > 0) selAllSku.checked = skuSel === skuAll;
 }
 
 // 通用下载一组图片（抽取 downloadAllImages 逻辑）
