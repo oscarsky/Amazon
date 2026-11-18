@@ -54,27 +54,36 @@ function cleanText(text) {
  * 抓取亚马逊商品页面
  */
 async function fetchAmazon(productUrl) {
-  // 规范化 URL，强制 zh_TW + CNY
+  // 规范化 URL，强制 zh_TW + CNY，配送至中国以显示 AmazonGlobal 运费
   const parsed = new URL(productUrl);
   parsed.searchParams.set('language', 'zh_TW');
   parsed.searchParams.set('currency', 'CNY');
+  parsed.searchParams.set('shipToCountry', 'CN');
   const cleanUrl = parsed.toString();
 
   let lastErr = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
       const instance = axios.create({
         headers: HEADERS,
         maxRedirects: 5,
-        timeout: 40000,
+        timeout: 30000,
         decompress: true,
       });
-      // 先访问主页预热
+      // 先访问主页预热，并尝试设置配送至中国，收集 Cookie
+      let cookieHeader = '';
       try {
-        await instance.get('https://www.amazon.com', { timeout: 20000 });
+        const warmup = await instance.get('https://www.amazon.com?shipToCountry=CN&currency=CNY', { timeout: 15000 });
+        const setCookies = warmup.headers['set-cookie'];
+        if (Array.isArray(setCookies) && setCookies.length) {
+          cookieHeader = setCookies.map(c => c.split(';')[0]).join('; ');
+        }
         await new Promise(r => setTimeout(r, 1000 + attempt * 500));
       } catch (e) { /* ignore warmup failure */ }
-      const r = await instance.get(cleanUrl);
+
+      const prodHeaders = { ...HEADERS };
+      if (cookieHeader) prodHeaders['Cookie'] = cookieHeader;
+      const r = await instance.get(cleanUrl, { headers: prodHeaders });
       if (r.status === 200 && !r.data.includes('validateCaptcha')) {
         return r.data;
       }
@@ -82,7 +91,7 @@ async function fetchAmazon(productUrl) {
     } catch (e) {
       lastErr = e.message;
     }
-    await new Promise(r => setTimeout(r, 2000 + attempt * 1000));
+    await new Promise(r => setTimeout(r, 1500 + attempt * 1000));
   }
   throw new Error(`亚马逊返回了验证码页面或请求失败（${lastErr}），请稍后重试`);
 }
@@ -330,6 +339,53 @@ function parseVariants($) {
 }
 
 /**
+ * 解析价格详情：总价（含配送费+进口费）、单价、配送费、进口费
+ * 优先取"总计"对应的价格
+ */
+function parsePriceDetail($) {
+  let total = null, unit = null, shipping = null, importFee = null;
+
+  // 方法1: apexPriceToPay 通常就是应付总价
+  const apex = $('.apexPriceToPay .a-offscreen').first();
+  if (apex.length) {
+    const v = cleanText(apex.text());
+    if (v && /\d/.test(v)) total = v;
+  }
+
+  // 方法2: 通过"總計/总计"等标签所在行找价格
+  $('.a-color-secondary').each((_, el) => {
+    const label = cleanText($(el).text());
+    let key = null;
+    if (/總計|总计/.test(label)) key = 'total';
+    else if (/^價格$|^价格$/.test(label)) key = 'unit';
+    else if (/配送/.test(label)) key = 'shipping';
+    else if (/進口費用|进口费用|進口費|进口费/.test(label)) key = 'importFee';
+
+    if (key) {
+      const $row = $(el).closest('.a-row, tr');
+      if (!$row.length) return;
+      const priceEl = $row.find('.a-offscreen').first();
+      if (!priceEl.length) return;
+      const val = cleanText(priceEl.text());
+      if (!val || !/\d/.test(val)) return;
+      if (key === 'total' && !total) total = val;
+      else if (key === 'unit' && !unit) unit = val;
+      else if (key === 'shipping' && !shipping) shipping = val;
+      else if (key === 'importFee' && !importFee) importFee = val;
+    }
+  });
+
+  // 兜底：原来的单价选择器
+  if (!unit) {
+    const priceEl = $('.a-price .a-offscreen').first();
+    if (priceEl.length) unit = cleanText(priceEl.text());
+  }
+  if (!total) total = unit;
+
+  return { total, unit, shipping, importFee };
+}
+
+/**
  * 主采集流程
  */
 async function scrape(productUrl) {
@@ -339,8 +395,7 @@ async function scrape(productUrl) {
   const titleEl = $('#productTitle');
   const title = cleanText(t2s(titleEl.text().trim()));
 
-  const priceEl = $('.a-price .a-offscreen').first();
-  const price = cleanText(priceEl.text().trim());
+  const priceDetail = parsePriceDetail($);
 
   const bullets = [];
   $('#feature-bullets li span').each((_, el) => {
@@ -354,13 +409,32 @@ async function scrape(productUrl) {
   const sku = parseSku($);
   const variants = parseVariants($);
 
-  return { title, price, bullets, images, video, brand, sku, variants, url: productUrl };
+  // 调试：检查 AmazonGlobal 上下文
+  let amazonGlobalContext = '';
+  const agIdx = html.indexOf('AmazonGlobal');
+  if (agIdx >= 0) {
+    amazonGlobalContext = html.slice(Math.max(0, agIdx - 200), agIdx + 300).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+  const hasCNY = html.includes('CNY') || html.includes('¥') || html.includes('￥');
+  const hasUSD = html.includes('$');
+  return { title, price: priceDetail.total, priceDetail, bullets, images, video, brand, sku, variants, url: productUrl, debug: { hasAmazonGlobal: agIdx >= 0, hasDelivery: html.includes('配送') || html.includes('遞送') || html.includes('運送'), hasTotal: html.includes('總計') || html.includes('总计'), hasCNY, hasUSD, amazonGlobalContext, priceDetail } };
 }
 
 // ==================== 路由 ====================
 
 app.get('/', (req, res) => {
   res.type('html').send(INDEX_HTML);
+});
+
+// 调试：检查服务器出口IP区域
+app.get('/api/debug_ip', async (req, res) => {
+  try {
+    const r = await axios.get('https://checkip.amazonaws.com/', { timeout: 10000 });
+    const ip = (r.data || '').trim();
+    res.json({ ip });
+  } catch (e) {
+    res.json({ error: e.message });
+  }
 });
 
 app.post('/api/scrape', async (req, res) => {
@@ -560,6 +634,23 @@ const INDEX_HTML = `<!DOCTYPE html>
   .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 10px 22px; border-radius: 20px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 999; }
   .toast.show { opacity: 1; }
   .error-msg { background: #fff5f5; color: #c53030; padding: 14px 18px; border-radius: 8px; border-left: 4px solid #c53030; }
+
+  /* 错误指引卡片 */
+  .error-guide { display: flex; gap: 14px; background: #fff; border-radius: 12px; padding: 20px 22px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(0,0,0,.06); border-left: 4px solid #ff9900; }
+  .error-guide-icon { font-size: 32px; flex-shrink: 0; line-height: 1; }
+  .error-guide-body { flex: 1; }
+  .error-guide-title { font-size: 16px; font-weight: 700; color: #c53030; margin-bottom: 8px; }
+  .error-guide-desc { font-size: 14px; color: #555; line-height: 1.7; margin-bottom: 14px; }
+  .error-guide-desc code { background: #f0f2f5; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+  .error-guide-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn-secondary { background: #eef2f7; color: #333; }
+  .btn-secondary:hover { background: #dfe6ef; }
+
+  /* 价格详情 */
+  .price-total { font-size: 22px; font-weight: 700; color: #c53030; }
+  .price-breakdown { font-size: 13px; color: #888; margin-top: 6px; line-height: 1.8; }
+  .price-breakdown .pb-row { display: flex; justify-content: space-between; max-width: 320px; }
+  .price-breakdown .pb-total { font-weight: 700; color: #c53030; border-top: 1px dashed #ddd; padding-top: 4px; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -578,6 +669,19 @@ const INDEX_HTML = `<!DOCTYPE html>
   <div class="progress-wrap" id="progressWrap">
     <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
     <div class="progress-text" id="progressText">准备中...</div>
+  </div>
+
+  <!-- 错误指引卡片 -->
+  <div class="error-guide" id="errorGuide" style="display:none">
+    <div class="error-guide-icon">⚠️</div>
+    <div class="error-guide-body">
+      <div class="error-guide-title" id="errorGuideTitle">采集失败</div>
+      <div class="error-guide-desc" id="errorGuideDesc"></div>
+      <div class="error-guide-actions">
+        <button class="btn btn-primary" onclick="doScrape()">🔄 重新采集</button>
+        <a class="btn btn-secondary" id="errorGuideLink" href="#" target="_blank" rel="noopener">🔗 打开商品页手动验证</a>
+      </div>
+    </div>
   </div>
 
   <!-- 基本信息 -->
@@ -737,11 +841,36 @@ function failProgress(msg){
   fill.style.width = '100%';
   fill.style.background = '#c53030';
   txt.textContent = '采集失败: ' + msg;
+
+  // 显示错误指引卡片
+  const guide = document.getElementById('errorGuide');
+  const title = document.getElementById('errorGuideTitle');
+  const desc = document.getElementById('errorGuideDesc');
+  const link = document.getElementById('errorGuideLink');
+  const url = document.getElementById('urlInput').value.trim();
+  link.href = url || '#';
+
+  // 判断是否为验证码相关错误
+  const isCaptcha = /验证码|validateCaptcha|status=200/i.test(msg || '');
+  if(isCaptcha){
+    title.textContent = '🛡️ 亚马逊触发了人机验证';
+    desc.innerHTML = '这是亚马逊的反爬机制，并非工具故障。服务器已自动重试多次仍被拦截。<br>' +
+      '建议按以下方式解决：<br>' +
+      '1. 等待 <b>10~30 秒</b> 后点击「重新采集」；<br>' +
+      '2. 或点击「打开商品页手动验证」，在新标签页中完成亚马逊验证码，然后回到本页重新采集。<br>' +
+      '<span style="color:#888;font-size:12px">提示：频繁采集同一商品更容易触发验证，请适当间隔。</span>';
+  } else {
+    title.textContent = '采集失败';
+    desc.textContent = msg || '未知错误，请检查链接是否正确后重试。';
+  }
+  guide.style.display = 'flex';
 }
 
 async function doScrape(){
   const url = document.getElementById('urlInput').value.trim();
   if(!url){ toast('请输入链接'); return; }
+  // 隐藏上一次的错误指引
+  document.getElementById('errorGuide').style.display = 'none';
   const btn = document.getElementById('scrapeBtn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> 采集中...';
@@ -784,7 +913,32 @@ function renderResult(d){
   setField('fTitle', d.title);
   setField('fBrand', d.brand);
   setField('fSku', d.sku);
-  setField('fPrice', d.price);
+
+  // 价格：优先显示总价（含配送+进口费），并展示明细
+  const priceEl = document.getElementById('fPrice');
+  const pd = d.priceDetail || {};
+  const total = d.price || pd.total;
+  if(total){
+    priceEl.classList.remove('placeholder');
+    const safeTotal = escapeHtml(total);
+    let html = '<div class="price-total">' + safeTotal + '<button class="copy-btn" data-text="' + safeTotal.replace(/"/g,'&quot;') + '">📋 复制</button></div>';
+    // 明细
+    const rows = [];
+    if(pd.unit) rows.push(['单价', pd.unit]);
+    if(pd.shipping) rows.push(['配送费', pd.shipping]);
+    if(pd.importFee) rows.push(['进口费', pd.importFee]);
+    if(rows.length){
+      let bd = '<div class="price-breakdown">';
+      rows.forEach(r=>{ bd += '<div class="pb-row"><span>'+escapeHtml(r[0])+'</span><span>'+escapeHtml(r[1])+'</span></div>'; });
+      bd += '<div class="pb-row pb-total"><span>总计</span><span>'+safeTotal+'</span></div>';
+      bd += '</div>';
+      html += bd;
+    }
+    priceEl.innerHTML = html;
+  } else {
+    priceEl.textContent = '未采集到';
+    priceEl.classList.add('placeholder');
+  }
 
   // 关于此商品
   const bulletsEl = document.getElementById('fBullets');
