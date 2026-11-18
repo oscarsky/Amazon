@@ -234,37 +234,30 @@ function parseBrand($) {
 }
 
 /**
- * 解析商品尺寸/规格信息（如 "1.38 Ounce (Pack of 50)"）
+ * 解析商品尺寸/规格信息（优先返回变体规格，如 "1.38 Ounce (Pack of 50)"）
  */
 function parseDimensions($) {
-  // 1. 优先从详情列表获取 Item Weight / 商品重量
-  const itemWeight = parseDetailRow($, ['Item Weight', '商品重量', '物品重量', '產品重量']);
-  // 2. 获取 Product Dimensions / 商品尺寸
-  const dimensions = parseDetailRow($, ['Product Dimensions', '商品尺寸', '產品尺寸', '尺寸']);
-  // 3. 获取包装数量
-  const packInfo = parseDetailRow($, ['Number of Items', '件数', '商品数量', 'NumberOfItems']);
-  // 4. 获取当前选中的变体名称（可能包含规格）
+  // 1. 优先返回当前选中的变体规格（如 "1.38 Ounce (Pack of 50)"）
   const selected = parseSelectedVariant($);
+  if (selected) return selected;
 
-  // 组合结果：重量 + 包装信息
-  const parts = [];
-  if (itemWeight) parts.push(itemWeight);
-  if (packInfo && !itemWeight?.includes(packInfo)) parts.push(`(${packInfo})`);
-  if (selected && !itemWeight?.includes(selected) && !packInfo?.includes(selected)) {
-    // 变体名可能含 Pack of X
-    const packMatch = selected.match(/Pack of \d+/i);
-    if (packMatch && !parts.some(p => p.includes(packMatch[0]))) {
-      parts.push(`(${packMatch[0]})`);
-    } else if (!packMatch && selected.length < 50) {
-      parts.push(selected);
-    }
+  // 2. 从标题中提取规格信息（如 "1.4 盎司。50 支装"）
+  const titleEl = $('#productTitle');
+  const titleText = cleanText(t2s(titleEl.text().trim()));
+  // 匹配 "数字+单位" 如 1.4盎司、50支装、69盎司 等
+  const specMatch = titleText.match(/(\d+\.?\d*)\s*(盎司|毫升|克|千克|英镑|磅|瓶|罐|袋|盒|支|条|片|粒|件|装)/g);
+  if (specMatch && specMatch.length) {
+    return specMatch.join(' ');
   }
 
-  if (parts.length) return cleanText(parts.join(' '));
-  // 兜底：商品尺寸
+  // 3. 兜底：Item Weight / 商品重量
+  const itemWeight = parseDetailRow($, ['Item Weight', '商品重量', '物品重量', '產品重量']);
+  if (itemWeight) return itemWeight;
+
+  // 4. 商品尺寸
+  const dimensions = parseDetailRow($, ['Product Dimensions', '商品尺寸', '產品尺寸', '尺寸']);
   if (dimensions) return dimensions;
-  // 再兜底：变体名称
-  if (selected) return selected;
+
   return null;
 }
 
@@ -272,17 +265,31 @@ function parseDimensions($) {
  * 解析当前选中的变体名称
  */
 function parseSelectedVariant($) {
-  // 遍历所有 a-button-selected 内的图片，找第一个有 alt 的
+  // 1. 遍历所有 a-button-selected 内的图片，找第一个有 alt 的
   const selImgs = $('.a-button-selected img').toArray();
   for (const el of selImgs) {
     const alt = cleanText($(el).attr('alt') || '');
     if (alt) return translateVariant(alt);
   }
-  // aria-pressed=true
+  // 2. aria-pressed=true 的按钮
   const pressed = $('[aria-pressed="true"] img').toArray();
   for (const el of pressed) {
     const alt = cleanText($(el).attr('alt') || '');
     if (alt) return translateVariant(alt);
+  }
+  // 3. 下拉选择框中选中的 option
+  const selSelects = $('select#variation_size_name option:checked, select[name*="size_name"] option:checked, select[name*="variation"] option:checked').toArray();
+  for (const el of selSelects) {
+    const txt = cleanText($(el).text());
+    if (txt && txt !== '--选择--' && txt !== '--Select--' && !/请选择|Select/i.test(txt)) {
+      return translateVariant(txt);
+    }
+  }
+  // 4. 遍历所有 a-button-selected，找第一个有有效文本的
+  const selBtns = $('.a-button-selected').toArray();
+  for (const el of selBtns) {
+    const txt = cleanText($(el).text());
+    if (txt && txt.length > 0 && txt.length < 80) return translateVariant(txt);
   }
   return null;
 }
@@ -349,8 +356,8 @@ function parseVariants($) {
   const variants = [];
   const seen = new Set();
 
-  // 收集所有可能的变体图片：swatch、inline-twister、twister、a-button-toggle
-  const selectors = [
+  // 1. 图片式变体：swatch、inline-twister、twister、a-button-toggle 等
+  const imgSelectors = [
     '.swatch-image-wrapper img',
     '[class*="swatch"] img',
     '.inline-twister-image img',
@@ -359,24 +366,74 @@ function parseVariants($) {
     '.a-button-thumbnail img',
     '.image-swatch-button img',
     '[data-defaultasin] img',
+    '.a-button img',
   ];
 
-  for (const sel of selectors) {
+  for (const sel of imgSelectors) {
     $(sel).each((_, el) => {
       const alt = cleanText($(el).attr('alt') || '');
       const src = $(el).attr('src') || '';
       if (!alt || !src || !src.includes('/images/I/')) return;
-      // 排除主图区域和视频缩略图
       if (src.includes('SY50') || src.includes('US40')) return;
       const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
       if (!m) return;
       const bid = m[1];
-      if (seen.has(bid)) return;
-      seen.add(bid);
+      if (seen.has(alt)) return;
+      seen.add(alt);
       variants.push({
         name: translateVariant(alt),
         image: `https://m.media-amazon.com/images/I/${bid}._SL1500_.jpg`,
       });
+    });
+  }
+
+  // 2. 文本按钮式变体（无图片的规格按钮，如 "1.38 Ounce (Pack of 50)"）
+  if (variants.length === 0) {
+    // 变体按钮通常在 .inline-twister-swatch 或 .swatch-list-item-text 容器内
+    const varContainers = $('.inline-twister-swatch, .swatch-list-item-text, #variation_size_name, #twister');
+    varContainers.each((_, container) => {
+      $(container).find('.a-button, .a-button-toggle, .swatch-element').each((_, el) => {
+        const $btn = $(el);
+        // 跳过已选中的按钮（当前规格，不重复显示在"其他变体"中）
+        if ($btn.hasClass('a-button-selected')) return;
+        const txt = cleanText($btn.text());
+        if (!txt || txt.length > 80) return;
+        if (seen.has(txt)) return;
+        // 尝试从按钮内找图片（img 标签或 data 属性）
+        let img = '';
+        const imgEl = $btn.find('img').first();
+        let src = imgEl.attr('src') || imgEl.attr('data-old-hires') || '';
+        // 尝试从按钮的 data-a-dynamic-image 中解析
+        if (!src) {
+          const dynamic = $btn.find('[data-a-dynamic-image]').first().attr('data-a-dynamic-image') || $btn.attr('data-a-dynamic-image') || '';
+          if (dynamic) {
+            try {
+              const imgObj = JSON.parse(dynamic);
+              const keys = Object.keys(imgObj);
+              if (keys.length) src = keys[0];
+            } catch (e) { /* ignore */ }
+          }
+        }
+        // 尝试 data-src / data-image
+        if (!src) src = $btn.find('[data-src]').first().attr('data-src') || $btn.attr('data-src') || '';
+        if (src && src.includes('/images/I/')) {
+          const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+          if (m) img = `https://m.media-amazon.com/images/I/${m[1]}._SL1500_.jpg`;
+        }
+        seen.add(txt);
+        variants.push({ name: translateVariant(txt), image: img });
+      });
+    });
+  }
+
+  // 3. 下拉选择框式变体
+  if (variants.length === 0) {
+    $('select#variation_size_name option, select[name*="size_name"] option, select[name*="variation"] option').each((_, el) => {
+      const txt = cleanText($(el).text());
+      if (!txt || /请选择|Select|--/i.test(txt)) return;
+      if (seen.has(txt)) return;
+      seen.add(txt);
+      variants.push({ name: translateVariant(txt), image: '' });
     });
   }
 
@@ -453,6 +510,10 @@ async function scrape(productUrl) {
   const brand = parseBrand($);
   const dimensions = parseDimensions($);
   const variants = parseVariants($);
+
+  // 无图片的文本变体，用主图第一张作为占位
+  const fallbackImg = (images && images[0]) ? images[0] : '';
+  variants.forEach(v => { if (!v.image) v.image = fallbackImg; });
 
   return { title, price: priceDetail.total, priceDetail, bullets, images, video, brand, dimensions, variants, url: productUrl };
 }
@@ -1010,11 +1071,15 @@ function renderResult(d){
     skuEl.classList.remove('placeholder');
     let html = '';
     d.variants.forEach((v,i)=>{
-      const dl = '/api/proxy_image?url=' + encodeURIComponent(v.image);
       const safeName = escapeHtml(v.name);
       const dataText = safeName.replace(/"/g,'&quot;');
       html += '<div class="sku-item">';
-      html += '<a class="sku-img" href="'+dl+'" download><img src="'+v.image+'" alt="'+safeName+'" loading="lazy" onerror="this.style.opacity=.3"><div class="dl-overlay"><span>⬇ 下载</span></div></a>';
+      if(v.image){
+        const dl = '/api/proxy_image?url=' + encodeURIComponent(v.image);
+        html += '<a class="sku-img" href="'+dl+'" download><img src="'+v.image+'" alt="'+safeName+'" loading="lazy" onerror="this.style.opacity=.3"><div class="dl-overlay"><span>⬇ 下载</span></div></a>';
+      } else {
+        html += '<div class="sku-img" style="display:flex;align-items:center;justify-content:center;background:#f0f0f0;color:#999;font-size:13px;">无图片</div>';
+      }
       html += '<div class="sku-name">'+safeName+'<button class="copy-btn" data-text="'+dataText+'">📋 复制</button></div>';
       html += '</div>';
     });
