@@ -660,8 +660,9 @@ async function scrape(productUrl) {
   const colorImages = parseColorImages(html);
 
   // 主图：采集"查看完整视图"画廊中的全部高清原图
-  // 方案：hiRes 排除变体专属图 为主 + altImages 缩略图去重兜底
-  // 亚马逊静态 HTML 里 hiRes 数量可能因 CAPTCHA 波动，altImages 的 6 张缩略图比较稳定
+  // 方案：hiRes 排除变体专属图 为主（这是最权威的数据源，顺序即 colorImages.initial 原始顺序）
+  //       #altImages 仅做兜底补充（当 hiRes 因 CAPTCHA 变少或重复时）
+  //       截断时按权威顺序直接切前 8 张，不能用 altImages 反过来覆盖 hiRes
   const galleryImgs = [];
   const seenImgIds = new Set();
   const addImg = (url) => {
@@ -678,9 +679,11 @@ async function scrape(productUrl) {
     const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
     if (m) hiResById.set(m[1], u);
   }
-  // 所有变体图 ID
+  // 所有变体图 ID（colorImages 各变体 key 下的专属主图）
   const allVariantImgIds = new Set();
-  for (const urls of Object.values(colorImages)) {
+  for (const [variantName, urls] of Object.entries(colorImages)) {
+    // 跳过 "initial" —— 那是公共画廊，不是某个具体变体的专属图
+    if (variantName === 'initial') continue;
     for (const u of urls) {
       const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
       if (m) {
@@ -689,14 +692,14 @@ async function scrape(productUrl) {
       }
     }
   }
-  // 源1. hiRes 排除变体专属图
+  // 源1. hiRes 排除变体专属图 —— 这是主图顺序的权威来源
   for (const u of parseAllHiResImages(html)) {
     const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
     const id = m ? m[1] : u;
     if (allVariantImgIds.has(id)) continue;
     addImg(u);
   }
-  // 源2. #altImages 缩略图去重补充（对应画廊右侧缩略图栏）
+  // 源2. #altImages 仅做兜底补充 —— 当 hiRes 被截断时补漏
   $('#altImages img').each((_, el) => {
     const src = $(el).attr('src') || '';
     if (!src.includes('/images/I/')) return;
@@ -709,36 +712,11 @@ async function scrape(productUrl) {
     else addImg(`https://m.media-amazon.com/images/I/${imgId}._SL1500_.jpg`);
   });
 
-  // 5. 兜底：画廊图片不应太多（正常单商品画廊 5-8 张）。
-  //    亚马逊 hiRes 里包含了每个变体的主图 + 公共画廊图。
-  //    即使排除了变体专属 hiRes，有时仍会多拿信息图（如尺寸图表、详情图）。
-  //    超过 8 张时，优先保留 #altImages 能映射到的图，其余截断到 8 张。
+  // 截断：权威顺序就是 hiRes 过滤后的顺序，直接切前 8 张
+  // 之前的错误逻辑是"优先保留 altImages 映射到的图"，但 altImages 缩略图 ID 与
+  // colorImages.initial 里的 hiRes ID 完全不同，会把真正的画廊图（如品牌宣传图）挤掉
   if (galleryImgs.length > 8) {
-    const altIds = new Set();
-    $('#altImages img').each((_, el) => {
-      const src = $(el).attr('src') || '';
-      if (!src.includes('/images/I/')) return;
-      if (/\/video\//i.test(src)) return;
-      const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-      if (m) altIds.add(m[1]);
-    });
-    // 映射到 altIds 的图优先
-    const kept = [];
-    const seen = new Set();
-    for (const u of galleryImgs) {
-      const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-      const id = m ? m[1] : u;
-      if (altIds.has(id) && !seen.has(id)) { kept.push(u); seen.add(id); }
-    }
-    // 剩余位置再用其他 hiRes 图填满（最多 8）
-    for (const u of galleryImgs) {
-      if (kept.length >= 8) break;
-      const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-      const id = m ? m[1] : u;
-      if (!seen.has(id)) { kept.push(u); seen.add(id); }
-    }
-    galleryImgs.length = 0;
-    galleryImgs.push(...kept.slice(0, 8));
+    galleryImgs.length = 8;
   }
   // 兜底
   if (galleryImgs.length === 0) {
