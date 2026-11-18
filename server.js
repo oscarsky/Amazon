@@ -384,17 +384,20 @@ function extractJsonArray(html, key) {
 
 /**
  * 从页面 HTML 中解析 colorImages，返回变体名称 -> 高清图片URL数组 的映射
- * 每个变体可能有多张图，全部收集
+ * 每个变体可能有多张图，全部收集（hiRes 优先，large 兜底）
  */
 function parseColorImages(html) {
   const map = {};
-  const colorImages = extractJsonObject(html, '"colorImages":');
+  // 尝试多种键名格式
+  let colorImages = extractJsonObject(html, '"colorImages":') || extractJsonObject(html, "'colorImages':") || extractJsonObject(html, 'colorImages:');
   if (!colorImages) return map;
   for (const [variantName, imgs] of Object.entries(colorImages)) {
     if (!Array.isArray(imgs)) continue;
     const urls = [];
     for (const img of imgs) {
-      if (img && img.hiRes) urls.push(img.hiRes);
+      if (!img) continue;
+      if (img.hiRes) urls.push(img.hiRes);
+      else if (img.large) urls.push(img.large);
     }
     if (urls.length) map[variantName] = urls;
   }
@@ -402,15 +405,57 @@ function parseColorImages(html) {
 }
 
 /**
- * 从 imageGalleryData 中提取画廊全部高清原图
+ * 从图片对象中提取高清 URL（hiRes 优先，large 兜底）
+ */
+function imgUrl(img) {
+  if (!img) return null;
+  return img.hiRes || img.large || null;
+}
+
+/**
+ * 从 imageGalleryData 中提取画廊全部高清原图（页面"查看完整视图"展示的图）
+ * 兼容数组格式和对象包裹数组格式
  */
 function parseImageGalleryData(html) {
   const urls = [];
-  const gallery = extractJsonArray(html, "'imageGalleryData':") || extractJsonArray(html, '"imageGalleryData":');
-  if (Array.isArray(gallery)) {
-    for (const item of gallery) {
-      if (item && item.hiRes) urls.push(item.hiRes);
+  const key = 'imageGalleryData';
+  let pos = 0;
+  while ((pos = html.indexOf(key, pos)) !== -1) {
+    // 跳过关键词后的引号、冒号、等号、空白
+    let i = pos + key.length;
+    while (i < html.length && /[\s'":=]/.test(html[i])) i++;
+    let end = -1;
+    let isArray = false;
+    if (html[i] === '[') {
+      isArray = true;
+      let depth = 0;
+      for (let j = i; j < html.length; j++) {
+        if (html[j] === '[') depth++;
+        else if (html[j] === ']') { depth--; if (depth === 0) { end = j; break; } }
+      }
+    } else if (html[i] === '{') {
+      // 对象格式，可能包含 images 数组或直接是图片对象
+      let depth = 0;
+      for (let j = i; j < html.length; j++) {
+        if (html[j] === '{') depth++;
+        else if (html[j] === '}') { depth--; if (depth === 0) { end = j; break; } }
+      }
     }
+    if (end < 0) { pos = i; continue; }
+    try {
+      const data = JSON.parse(html.slice(i, end + 1));
+      if (Array.isArray(data)) {
+        for (const item of data) { const u = imgUrl(item); if (u) urls.push(u); }
+      } else if (data && typeof data === 'object') {
+        // 可能是 {images: [...]} 或直接是图片对象
+        if (Array.isArray(data.images)) {
+          for (const item of data.images) { const u = imgUrl(item); if (u) urls.push(u); }
+        } else {
+          const u = imgUrl(data); if (u) urls.push(u);
+        }
+      }
+    } catch (e) { /* ignore */ }
+    pos = end + 1;
   }
   return urls;
 }
@@ -436,77 +481,76 @@ function parseVariants($) {
   const variants = [];
   const seen = new Set();
 
-  // 1. 图片式变体：swatch、inline-twister、twister、a-button-toggle 等
-  const imgSelectors = [
-    '.swatch-image-wrapper img',
-    '[class*="swatch"] img',
-    '.inline-twister-image img',
-    '#twister img',
-    '.a-button-toggle img',
-    '.a-button-thumbnail img',
-    '.image-swatch-button img',
-    '[data-defaultasin] img',
-    '.a-button img',
-  ];
+  // 只在"变体选择容器"内扫描，避免把 #altImages 画廊缩略图误判为变体
+  // 亚马逊变体选择器通常位于这些容器中
+  const variantContainerSel = [
+    '#twister',
+    '.inline-twister',
+    '.inline-twister-swatch',
+    '.swatch',
+    '.swatch-list',
+    '#variation_size_name',
+    '#variation_color_name',
+    '#variation_style_name',
+    '#variation_item_package_quantity',
+    '[data-defaultasin]',
+  ].join(', ');
 
-  for (const sel of imgSelectors) {
-    $(sel).each((_, el) => {
-      const alt = cleanText($(el).attr('alt') || '');
-      const src = $(el).attr('src') || '';
-      if (!alt || !src || !src.includes('/images/I/')) return;
-      if (src.includes('SY50') || src.includes('US40')) return;
+  const $vc = $(variantContainerSel);
+
+  // 1. 图片式变体（颜色/样式选择的小图，带 alt 文本）
+  $vc.find('img').each((_, el) => {
+    const alt = cleanText($(el).attr('alt') || '');
+    const src = $(el).attr('src') || '';
+    if (!alt || !src || !src.includes('/images/I/')) return;
+    if (src.includes('SY50') || src.includes('US40')) return;
+    const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+    if (!m) return;
+    const bid = m[1];
+    if (seen.has(alt)) return;
+    seen.add(alt);
+    variants.push({
+      name: alt,
+      image: `https://m.media-amazon.com/images/I/${bid}._SL1500_.jpg`,
+    });
+  });
+
+  // 2. 文本按钮式变体（规格按钮，如 "5.32 Ounce (Pack of 2)"）
+  // 与图片式同时检测、用 seen 去重，支持同时有颜色+规格的商品
+  $vc.find('.a-button, .a-button-toggle, .swatch-element, .a-button-text').each((_, el) => {
+    const $btn = $(el);
+    // 跳过已禁用（不可选）的按钮
+    if ($btn.hasClass('a-button-disabled')) return;
+    // 跳过仅作为容器的按钮（如外层包裹），需要有实际文本
+    const txt = cleanText($btn.clone().find('span.a-icon-text').remove().end().text());
+    if (!txt || txt.length > 80) return;
+    if (seen.has(txt)) return;
+    // 尝试从按钮内找图片（img 标签或 data 属性）
+    let img = '';
+    const imgEl = $btn.find('img').first();
+    let src = imgEl.attr('src') || imgEl.attr('data-old-hires') || '';
+    // 尝试从按钮的 data-a-dynamic-image 中解析
+    if (!src) {
+      const dynamic = $btn.find('[data-a-dynamic-image]').first().attr('data-a-dynamic-image') || $btn.attr('data-a-dynamic-image') || '';
+      if (dynamic) {
+        try {
+          const imgObj = JSON.parse(dynamic);
+          const keys = Object.keys(imgObj);
+          if (keys.length) src = keys[0];
+        } catch (e) { /* ignore */ }
+      }
+    }
+    // 尝试 data-src / data-image
+    if (!src) src = $btn.find('[data-src]').first().attr('data-src') || $btn.attr('data-src') || '';
+    if (src && src.includes('/images/I/')) {
       const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-      if (!m) return;
-      const bid = m[1];
-      if (seen.has(alt)) return;
-      seen.add(alt);
-      variants.push({
-        name: alt,
-        image: `https://m.media-amazon.com/images/I/${bid}._SL1500_.jpg`,
-      });
-    });
-  }
+      if (m) img = `https://m.media-amazon.com/images/I/${m[1]}._SL1500_.jpg`;
+    }
+    seen.add(txt);
+    variants.push({ name: txt, image: img });
+  });
 
-  // 2. 文本按钮式变体（无图片的规格按钮，如 "1.38 Ounce (Pack of 50)"）
-  if (variants.length === 0) {
-    // 变体按钮通常在 .inline-twister-swatch 或 .swatch-list-item-text 容器内
-    const varContainers = $('.inline-twister-swatch, .swatch-list-item-text, #variation_size_name, #twister');
-    varContainers.each((_, container) => {
-      $(container).find('.a-button, .a-button-toggle, .swatch-element').each((_, el) => {
-        const $btn = $(el);
-        // 跳过已选中的按钮（当前规格，不重复显示在"其他变体"中）
-        if ($btn.hasClass('a-button-selected')) return;
-        const txt = cleanText($btn.text());
-        if (!txt || txt.length > 80) return;
-        if (seen.has(txt)) return;
-        // 尝试从按钮内找图片（img 标签或 data 属性）
-        let img = '';
-        const imgEl = $btn.find('img').first();
-        let src = imgEl.attr('src') || imgEl.attr('data-old-hires') || '';
-        // 尝试从按钮的 data-a-dynamic-image 中解析
-        if (!src) {
-          const dynamic = $btn.find('[data-a-dynamic-image]').first().attr('data-a-dynamic-image') || $btn.attr('data-a-dynamic-image') || '';
-          if (dynamic) {
-            try {
-              const imgObj = JSON.parse(dynamic);
-              const keys = Object.keys(imgObj);
-              if (keys.length) src = keys[0];
-            } catch (e) { /* ignore */ }
-          }
-        }
-        // 尝试 data-src / data-image
-        if (!src) src = $btn.find('[data-src]').first().attr('data-src') || $btn.attr('data-src') || '';
-        if (src && src.includes('/images/I/')) {
-          const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-          if (m) img = `https://m.media-amazon.com/images/I/${m[1]}._SL1500_.jpg`;
-        }
-        seen.add(txt);
-        variants.push({ name: txt, image: img });
-      });
-    });
-  }
-
-  // 3. 下拉选择框式变体
+  // 3. 下拉选择框式变体（兜底，仅在未找到任何按钮式变体时使用）
   if (variants.length === 0) {
     $('select#variation_size_name option, select[name*="size_name"] option, select[name*="variation"] option').each((_, el) => {
       const txt = cleanText($(el).text());
@@ -515,6 +559,19 @@ function parseVariants($) {
       seen.add(txt);
       variants.push({ name: txt, image: '' });
     });
+  }
+
+  // 4. 如果变体列表位于折叠的 expander 内（"查看更多" aria-expanded=false），
+  //    说明页面默认只显示前几项，其余需点击展开。此时只保留前 3 个（与页面默认可见数一致）
+  const expanderContent = $('.dimension-expander-content, [id^="inline-twister-expander-content"]')
+    .has('.inline-twister-swatch, .swatch, .a-button-toggle')
+    .first();
+  if (expanderContent.length) {
+    const row = expanderContent.closest('.inline-twister-row, .a-section, .a-row').first();
+    const toggle = row.find('[data-a-expander-toggle]').first();
+    if (toggle.length && toggle.attr('aria-expanded') === 'false') {
+      variants.length = Math.min(variants.length, 3);
+    }
   }
 
   return variants;
@@ -593,7 +650,10 @@ async function scrape(productUrl) {
   const colorImages = parseColorImages(html);
 
   // 主图：采集"查看完整视图"画廊中的全部高清原图
-  // 优先取 colorImages 中选中变体的图（保证主图在前），再合并全页面所有 hiRes 图去重
+  // 1) colorImages 中选中变体的图（主图）
+  // 2) 全页面 hiRes 中不属于任何变体的图（公共画廊图：信息图、场景图等）
+  // 3) #altImages 缩略图转 SL1500 兜底
+  // 4) landingImage 最大尺寸兜底
   const galleryImgs = [];
   const seenImgIds = new Set();
   const addImg = (url) => {
@@ -604,50 +664,58 @@ async function scrape(productUrl) {
     seenImgIds.add(id);
     galleryImgs.push(url);
   };
+  // 收集所有变体的图片 ID（用于排除）
+  const allVariantImgIds = new Set();
+  for (const urls of Object.values(colorImages)) {
+    for (const u of urls) {
+      const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+      if (m) allVariantImgIds.add(m[1]);
+    }
+  }
   // 1. 选中变体的 colorImages 图排在最前
-  let selectedImgs = dimensions && colorImages[dimensions] ? colorImages[dimensions] : null;
-  if (!selectedImgs && dimensions) {
-    const dimLower = String(dimensions).toLowerCase();
-    for (const [name, urls] of Object.entries(colorImages)) {
-      if (name.toLowerCase() === dimLower) { selectedImgs = urls; break; }
+  let selectedImgs = null;
+  if (dimensions) {
+    const dimStr = String(dimensions);
+    selectedImgs = colorImages[dimStr] || null;
+    if (!selectedImgs) {
+      const dimLower = dimStr.toLowerCase();
+      for (const [name, urls] of Object.entries(colorImages)) {
+        const nl = name.toLowerCase();
+        if (nl === dimLower || nl.includes(dimLower) || dimLower.includes(nl)) {
+          selectedImgs = urls; break;
+        }
+      }
     }
   }
   if (selectedImgs) selectedImgs.forEach(addImg);
-  // 2. 全页面所有 hiRes 高清原图（覆盖 imageGalleryData / colorImages 等全部内联数据）
-  parseAllHiResImages(html).forEach(addImg);
-  // 3. altImages 缩略图转 SL1500 兜底
+  // 2. 全页面 hiRes 中排除所有变体的图，剩余为公共画廊图
+  for (const u of parseAllHiResImages(html)) {
+    const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+    const id = m ? m[1] : u;
+    if (allVariantImgIds.has(id)) continue;
+    addImg(u);
+  }
+  // 3. #altImages 缩略图转 SL1500 兜底
   $('#altImages img').each((_, el) => {
     const src = $(el).attr('src') || '';
     const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
     if (m) addImg(`https://m.media-amazon.com/images/I/${m[1]}._SL1500_.jpg`);
   });
-  // 4. landingImage 最大尺寸兜底
+  // 4. landingImage 兜底
   if (galleryImgs.length === 0) parseImages($).forEach(addImg);
 
   const images = galleryImgs;
   const fallbackImg = (images && images[0]) ? images[0] : '';
 
-  // 优先用 colorImages 构建变体列表（英文名 + 对应首张高清图），
-  // 排除当前选中的变体（已作为 dimensions 展示）
-  let variants = [];
-  const seen = new Set();
-  for (const [name, urls] of Object.entries(colorImages)) {
-    if (dimensions && (name === dimensions || name.toLowerCase() === String(dimensions).toLowerCase())) continue;
-    if (seen.has(name)) continue;
-    seen.add(name);
-    variants.push({ name, image: (urls && urls[0]) || fallbackImg });
-  }
-
-  // 兜底：colorImages 没有数据时，回退到 parseVariants
-  if (variants.length === 0) {
-    variants = parseVariants($);
-    variants.forEach(v => {
-      if (!v.image) {
-        const cu = colorImages[v.name];
-        v.image = (cu && cu[0]) || fallbackImg;
-      }
-    });
-  }
+  // 其他SKU：只取页面上可见的变体选择按钮（parseVariants），
+  // 图片从 colorImages 中按名称匹配（英文原文）
+  let variants = parseVariants($);
+  variants.forEach(v => {
+    if (!v.image) {
+      const cu = colorImages[v.name];
+      v.image = (cu && cu[0]) || fallbackImg;
+    }
+  });
 
   return { title, price: priceDetail.total, priceDetail, bullets, images, video, brand, dimensions, variants, url: productUrl };
 }
@@ -666,6 +734,110 @@ app.post('/api/scrape', async (req, res) => {
   try {
     const data = await scrape(productUrl);
     res.json({ ok: true, data });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 临时调试接口：检查页面图片数据结构
+app.post('/api/debug-images', async (req, res) => {
+  const productUrl = (req.body && req.body.url || '').trim();
+  if (!productUrl || !productUrl.includes('amazon.')) {
+    return res.status(400).json({ error: '无效链接' });
+  }
+  try {
+    const html = await fetchAmazon(productUrl);
+    const $ = cheerio.load(html);
+    const colorImages = parseColorImages(html);
+    const galleryData = parseImageGalleryData(html);
+    const allHiRes = parseAllHiResImages(html);
+    const altImgs = [];
+    $('#altImages img').each((_, el) => {
+      const src = $(el).attr('src') || '';
+      const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+      altImgs.push(m ? m[1] : src);
+    });
+    const dim = parseDimensions($);
+    let selImgs = [];
+    if (dim && colorImages[dim]) selImgs = colorImages[dim];
+    const colorKeys = {};
+    for (const [k, v] of Object.entries(colorImages)) colorKeys[k] = v.length;
+    const allHiResIds = allHiRes.map(u => { const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/); return m ? m[1] : u; });
+    // 调试：dump 变体按钮的 class / aria-disabled / 文本
+    const variantContainerSel = [
+      '#twister', '.inline-twister', '.inline-twister-swatch', '.swatch',
+      '.swatch-list', '#variation_size_name', '#variation_color_name',
+      '#variation_style_name', '#variation_item_package_quantity', '[data-defaultasin]',
+    ].join(', ');
+    const variantBtns = [];
+    $(variantContainerSel).find('.a-button, .a-button-toggle, .swatch-element, .a-button-text').each((_, el) => {
+      const $btn = $(el);
+      const txt = cleanText($btn.clone().find('span.a-icon-text').remove().end().text());
+      if (!txt || txt.length > 80) return;
+      variantBtns.push({
+        text: txt,
+        cls: $btn.attr('class') || '',
+        ariaDisabled: $btn.attr('aria-disabled') || '',
+        disabled: $btn.attr('disabled') || '',
+        parentCls: $btn.parent().attr('class') || '',
+        grandparentCls: $btn.parent().parent().attr('class') || '',
+      });
+    });
+    // dump twister / variation_size_name 的外层 HTML（截断）
+    const twisterHtml = $('#twister, #variation_size_name').first().html() || '';
+    // dump inline-twister-swatch 的外层及祖先链
+    const swatchEl = $('.inline-twister-swatch').first();
+    let swatchHtml = '';
+    let swatchAncestors = [];
+    if (swatchEl.length) {
+      swatchHtml = swatchEl.html() || '';
+      let cur = swatchEl;
+      for (let i = 0; i < 6 && cur.length; i++) {
+        swatchAncestors.push({ tag: cur[0].tagName, cls: cur.attr('class') || '', id: cur.attr('id') || '', html: (cur.attr('data-a-expander-toggle') || cur.attr('aria-expanded') || '') });
+        cur = cur.parent();
+      }
+    }
+    // 查找 expander 切换按钮（"See more"）
+    const expanderToggle = [];
+    $('[data-a-expander-toggle]').each((_, el) => {
+      const $e = $(el);
+      expanderToggle.push({ 
+        text: cleanText($e.text()), 
+        ariaExpanded: $e.attr('aria-expanded') || '', 
+        cls: $e.attr('class') || '',
+        dataToggle: $e.attr('data-a-expander-toggle') || '',
+        ariaControls: $e.attr('aria-controls') || '',
+      });
+    });
+    // 检查每个变体 li 是否有 hidden/aria-hidden 标记
+    const variantLiInfo = [];
+    $('.inline-twister-swatch').each((_, el) => {
+      const $li = $(el);
+      variantLiInfo.push({
+        text: cleanText($li.find('.a-button-text').first().text()).substring(0, 50),
+        cls: $li.attr('class') || '',
+        ariaHidden: $li.attr('aria-hidden') || '',
+        style: $li.attr('style') || '',
+      });
+    });
+    res.json({
+      ok: true,
+      dimensions: dim,
+      colorImagesKeys: colorKeys,
+      galleryDataCount: galleryData.length,
+      allHiResCount: allHiRes.length,
+      allHiResIds,
+      altImagesIds: altImgs,
+      selectedImgs: selImgs.map(u => { const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/); return m ? m[1] : u; }),
+      hasImageGalleryData: html.includes('imageGalleryData'),
+      hasColorImages: html.includes('colorImages'),
+      variantBtns,
+      twisterHtml: twisterHtml.substring(0, 4000),
+      swatchHtml: swatchHtml.substring(0, 3000),
+      swatchAncestors,
+      expanderToggle,
+      variantLiInfo,
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
