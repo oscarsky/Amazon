@@ -567,9 +567,19 @@ function parseVariants($) {
     .has('.inline-twister-swatch, .swatch, .a-button-toggle')
     .first();
   if (expanderContent.length) {
-    const row = expanderContent.closest('.inline-twister-row, .a-section, .a-row').first();
-    const toggle = row.find('[data-a-expander-toggle]').first();
-    if (toggle.length && toggle.attr('aria-expanded') === 'false') {
+    const expanderId = expanderContent.attr('id') || '';
+    let toggle = null;
+    if (expanderId) {
+      toggle = $(`[data-a-expander-toggle][aria-controls="${expanderId}"]`).first();
+    }
+    if (!toggle || !toggle.length) {
+      const row = expanderContent.closest('.inline-twister-row, .a-section, .a-row').first();
+      toggle = row.find('[data-a-expander-toggle]').first();
+    }
+    if (!toggle || !toggle.length) {
+      toggle = $('[data-a-expander-toggle][aria-expanded="false"]').first();
+    }
+    if (toggle && toggle.length && String(toggle.attr('aria-expanded')) === 'false') {
       variants.length = Math.min(variants.length, 3);
     }
   }
@@ -650,10 +660,8 @@ async function scrape(productUrl) {
   const colorImages = parseColorImages(html);
 
   // 主图：采集"查看完整视图"画廊中的全部高清原图
-  // 1) colorImages 中选中变体的图（主图）
-  // 2) 全页面 hiRes 中不属于任何变体的图（公共画廊图：信息图、场景图等）
-  // 3) #altImages 缩略图转 SL1500 兜底
-  // 4) landingImage 最大尺寸兜底
+  // 方案：hiRes 排除变体专属图 为主 + altImages 缩略图去重兜底
+  // 亚马逊静态 HTML 里 hiRes 数量可能因 CAPTCHA 波动，altImages 的 6 张缩略图比较稳定
   const galleryImgs = [];
   const seenImgIds = new Set();
   const addImg = (url) => {
@@ -664,45 +672,99 @@ async function scrape(productUrl) {
     seenImgIds.add(id);
     galleryImgs.push(url);
   };
-  // 收集所有变体的图片 ID（用于排除）
+  // hiRes 图 ID -> URL 映射
+  const hiResById = new Map();
+  for (const u of parseAllHiResImages(html)) {
+    const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+    if (m) hiResById.set(m[1], u);
+  }
+  // 所有变体图 ID
   const allVariantImgIds = new Set();
   for (const urls of Object.values(colorImages)) {
     for (const u of urls) {
       const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-      if (m) allVariantImgIds.add(m[1]);
-    }
-  }
-  // 1. 选中变体的 colorImages 图排在最前
-  let selectedImgs = null;
-  if (dimensions) {
-    const dimStr = String(dimensions);
-    selectedImgs = colorImages[dimStr] || null;
-    if (!selectedImgs) {
-      const dimLower = dimStr.toLowerCase();
-      for (const [name, urls] of Object.entries(colorImages)) {
-        const nl = name.toLowerCase();
-        if (nl === dimLower || nl.includes(dimLower) || dimLower.includes(nl)) {
-          selectedImgs = urls; break;
-        }
+      if (m) {
+        allVariantImgIds.add(m[1]);
+        if (!hiResById.has(m[1])) hiResById.set(m[1], u);
       }
     }
   }
-  if (selectedImgs) selectedImgs.forEach(addImg);
-  // 2. 全页面 hiRes 中排除所有变体的图，剩余为公共画廊图
+  // 源1. hiRes 排除变体专属图
   for (const u of parseAllHiResImages(html)) {
     const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
     const id = m ? m[1] : u;
     if (allVariantImgIds.has(id)) continue;
     addImg(u);
   }
-  // 3. #altImages 缩略图转 SL1500 兜底
+  // 源2. #altImages 缩略图去重补充（对应画廊右侧缩略图栏）
   $('#altImages img').each((_, el) => {
     const src = $(el).attr('src') || '';
+    if (!src.includes('/images/I/')) return;
+    if (/\/video\//i.test(src)) return;
     const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
-    if (m) addImg(`https://m.media-amazon.com/images/I/${m[1]}._SL1500_.jpg`);
+    if (!m) return;
+    const imgId = m[1];
+    const hiRes = hiResById.get(imgId);
+    if (hiRes) addImg(hiRes);
+    else addImg(`https://m.media-amazon.com/images/I/${imgId}._SL1500_.jpg`);
   });
-  // 4. landingImage 兜底
-  if (galleryImgs.length === 0) parseImages($).forEach(addImg);
+
+  // 5. 兜底：画廊图片不应太多（正常单商品画廊 5-8 张）。
+  //    亚马逊 hiRes 里包含了每个变体的主图 + 公共画廊图。
+  //    即使排除了变体专属 hiRes，有时仍会多拿信息图（如尺寸图表、详情图）。
+  //    超过 8 张时，优先保留 #altImages 能映射到的图，其余截断到 8 张。
+  if (galleryImgs.length > 8) {
+    const altIds = new Set();
+    $('#altImages img').each((_, el) => {
+      const src = $(el).attr('src') || '';
+      if (!src.includes('/images/I/')) return;
+      if (/\/video\//i.test(src)) return;
+      const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+      if (m) altIds.add(m[1]);
+    });
+    // 映射到 altIds 的图优先
+    const kept = [];
+    const seen = new Set();
+    for (const u of galleryImgs) {
+      const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+      const id = m ? m[1] : u;
+      if (altIds.has(id) && !seen.has(id)) { kept.push(u); seen.add(id); }
+    }
+    // 剩余位置再用其他 hiRes 图填满（最多 8）
+    for (const u of galleryImgs) {
+      if (kept.length >= 8) break;
+      const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+      const id = m ? m[1] : u;
+      if (!seen.has(id)) { kept.push(u); seen.add(id); }
+    }
+    galleryImgs.length = 0;
+    galleryImgs.push(...kept.slice(0, 8));
+  }
+  // 兜底
+  if (galleryImgs.length === 0) {
+    let selectedImgs = null;
+    if (dimensions) {
+      const dimStr = String(dimensions);
+      selectedImgs = colorImages[dimStr] || null;
+      if (!selectedImgs) {
+        const dimLower = dimStr.toLowerCase();
+        for (const [name, urls] of Object.entries(colorImages)) {
+          const nl = name.toLowerCase();
+          if (nl === dimLower || nl.includes(dimLower) || dimLower.includes(nl)) {
+            selectedImgs = urls; break;
+          }
+        }
+      }
+    }
+    if (selectedImgs) selectedImgs.forEach(addImg);
+    for (const u of parseAllHiResImages(html)) addImg(u);
+    $('#altImages img').each((_, el) => {
+      const src = $(el).attr('src') || '';
+      const m = src.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/);
+      if (m) addImg(`https://m.media-amazon.com/images/I/${m[1]}._SL1500_.jpg`);
+    });
+    if (galleryImgs.length === 0) parseImages($).forEach(addImg);
+  }
 
   const images = galleryImgs;
   const fallbackImg = (images && images[0]) ? images[0] : '';
@@ -763,63 +825,6 @@ app.post('/api/debug-images', async (req, res) => {
     const colorKeys = {};
     for (const [k, v] of Object.entries(colorImages)) colorKeys[k] = v.length;
     const allHiResIds = allHiRes.map(u => { const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/); return m ? m[1] : u; });
-    // 调试：dump 变体按钮的 class / aria-disabled / 文本
-    const variantContainerSel = [
-      '#twister', '.inline-twister', '.inline-twister-swatch', '.swatch',
-      '.swatch-list', '#variation_size_name', '#variation_color_name',
-      '#variation_style_name', '#variation_item_package_quantity', '[data-defaultasin]',
-    ].join(', ');
-    const variantBtns = [];
-    $(variantContainerSel).find('.a-button, .a-button-toggle, .swatch-element, .a-button-text').each((_, el) => {
-      const $btn = $(el);
-      const txt = cleanText($btn.clone().find('span.a-icon-text').remove().end().text());
-      if (!txt || txt.length > 80) return;
-      variantBtns.push({
-        text: txt,
-        cls: $btn.attr('class') || '',
-        ariaDisabled: $btn.attr('aria-disabled') || '',
-        disabled: $btn.attr('disabled') || '',
-        parentCls: $btn.parent().attr('class') || '',
-        grandparentCls: $btn.parent().parent().attr('class') || '',
-      });
-    });
-    // dump twister / variation_size_name 的外层 HTML（截断）
-    const twisterHtml = $('#twister, #variation_size_name').first().html() || '';
-    // dump inline-twister-swatch 的外层及祖先链
-    const swatchEl = $('.inline-twister-swatch').first();
-    let swatchHtml = '';
-    let swatchAncestors = [];
-    if (swatchEl.length) {
-      swatchHtml = swatchEl.html() || '';
-      let cur = swatchEl;
-      for (let i = 0; i < 6 && cur.length; i++) {
-        swatchAncestors.push({ tag: cur[0].tagName, cls: cur.attr('class') || '', id: cur.attr('id') || '', html: (cur.attr('data-a-expander-toggle') || cur.attr('aria-expanded') || '') });
-        cur = cur.parent();
-      }
-    }
-    // 查找 expander 切换按钮（"See more"）
-    const expanderToggle = [];
-    $('[data-a-expander-toggle]').each((_, el) => {
-      const $e = $(el);
-      expanderToggle.push({ 
-        text: cleanText($e.text()), 
-        ariaExpanded: $e.attr('aria-expanded') || '', 
-        cls: $e.attr('class') || '',
-        dataToggle: $e.attr('data-a-expander-toggle') || '',
-        ariaControls: $e.attr('aria-controls') || '',
-      });
-    });
-    // 检查每个变体 li 是否有 hidden/aria-hidden 标记
-    const variantLiInfo = [];
-    $('.inline-twister-swatch').each((_, el) => {
-      const $li = $(el);
-      variantLiInfo.push({
-        text: cleanText($li.find('.a-button-text').first().text()).substring(0, 50),
-        cls: $li.attr('class') || '',
-        ariaHidden: $li.attr('aria-hidden') || '',
-        style: $li.attr('style') || '',
-      });
-    });
     res.json({
       ok: true,
       dimensions: dim,
@@ -831,12 +836,6 @@ app.post('/api/debug-images', async (req, res) => {
       selectedImgs: selImgs.map(u => { const m = u.match(/\/images\/I\/([A-Za-z0-9+\-]+)\._/); return m ? m[1] : u; }),
       hasImageGalleryData: html.includes('imageGalleryData'),
       hasColorImages: html.includes('colorImages'),
-      variantBtns,
-      twisterHtml: twisterHtml.substring(0, 4000),
-      swatchHtml: swatchHtml.substring(0, 3000),
-      swatchAncestors,
-      expanderToggle,
-      variantLiInfo,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1106,8 +1105,11 @@ const INDEX_HTML = `<!DOCTYPE html>
   <!-- 媒体 -->
   <div class="card">
     <div class="media-header">
-      <div class="field-label">商品主图 / 视频</div>
-      <button class="download-all-btn" id="dlAllBtn" onclick="downloadAllImages()" style="display:none">⬇ 一键下载全部图片</button>
+      <div class="field-label">商品主图 / 视频 <label style="margin-left:12px;font-weight:normal;color:#aaa;font-size:12px;cursor:pointer"><input type="checkbox" id="selAll" checked onchange="toggleSelAll(this.checked)" style="margin-right:4px">全选 / 全不选</label></div>
+      <div style="display:flex;gap:8px">
+        <button class="download-all-btn" id="dlSelBtn" onclick="downloadSelectedImages()" style="display:none">⬇ 下载选中图片</button>
+        <button class="download-all-btn" id="dlAllBtn" onclick="downloadAllImages()" style="display:none">⬇ 下载全部图片</button>
+      </div>
     </div>
     <div class="media-grid placeholder" id="fImages">等待采集...</div>
     <div class="video-card placeholder" id="fVideo">暂无视频</div>
@@ -1346,18 +1348,25 @@ function renderResult(d){
 
   // 图片
   const imgEl = document.getElementById('fImages');
+  const selAllCk = document.getElementById('selAll');
   if(currentImages.length){
     imgEl.classList.remove('placeholder');
     let html = '';
     currentImages.forEach((src,i)=>{
       const dl = '/api/proxy_image?url=' + encodeURIComponent(src);
+      html += '<div class="media-item-wrap" style="position:relative">';
       html += '<a class="media-item" href="'+dl+'" download><img src="'+src+'" alt="主图'+(i+1)+'" loading="lazy" onerror="this.style.opacity=.3"><div class="dl-overlay"><span>⬇ 下载</span></div></a>';
+      html += '<input type="checkbox" class="img-sel" data-idx="'+i+'" checked onchange="updateSelBtn()" style="position:absolute;top:6px;left:6px;z-index:10;width:18px;height:18px;cursor:pointer">';
+      html += '</div>';
     });
     imgEl.innerHTML = html;
+    selAllCk.checked = true;
+    document.getElementById('dlSelBtn').style.display = 'inline-flex';
     document.getElementById('dlAllBtn').style.display = 'inline-flex';
   } else {
     imgEl.textContent = '未采集到图片';
     imgEl.classList.add('placeholder');
+    document.getElementById('dlSelBtn').style.display = 'none';
     document.getElementById('dlAllBtn').style.display = 'none';
   }
 
@@ -1396,27 +1405,49 @@ function renderResult(d){
   }
 }
 
-// 一键下载全部图片（使用 File System Access API，选择一次目录保存所有图片）
+// 一键下载全部图片（统一走 downloadImageList）
 async function downloadAllImages(){
-  if(!currentImages.length){ toast('没有可下载的图片'); return; }
-  const btn = document.getElementById('dlAllBtn');
+  await downloadImageList(currentImages, document.getElementById('dlAllBtn'));
+}
+
+// ============ 勾选下载 ============
+function getSelectedImages(){
+  const checks = document.querySelectorAll('.img-sel');
+  const urls = [];
+  checks.forEach(c => { if(c.checked){ const idx = parseInt(c.dataset.idx,10); if(!isNaN(idx) && currentImages[idx]) urls.push(currentImages[idx]); } });
+  return urls;
+}
+function toggleSelAll(checked){
+  document.querySelectorAll('.img-sel').forEach(c => c.checked = checked);
+  updateSelBtn();
+}
+function updateSelBtn(){
+  const sel = getSelectedImages();
+  const btn = document.getElementById('dlSelBtn');
+  if(!btn) return;
+  btn.textContent = '⬇ 下载选中 (' + sel.length + ')';
+  document.getElementById('selAll').checked = sel.length === currentImages.length;
+}
+
+// 通用下载一组图片（抽取 downloadAllImages 逻辑）
+async function downloadImageList(urls, btn){
+  if(!urls.length){ toast('没有可下载的图片'); return; }
   btn.disabled = true;
   const origText = btn.innerHTML;
 
-  // 优先使用 File System Access API（用户选择一次目录，所有图片直接写入）
   if(window.showDirectoryPicker){
     try{
       const dirHandle = await window.showDirectoryPicker();
       let success = 0;
-      for(let i = 0; i < currentImages.length; i++){
-        btn.innerHTML = '<span class="spinner"></span> 保存中 ' + (i+1) + '/' + currentImages.length;
+      for(let i = 0; i < urls.length; i++){
+        btn.innerHTML = '<span class="spinner"></span> 保存中 ' + (i+1) + '/' + urls.length;
         try{
-          const src = currentImages[i];
+          const src = urls[i];
           const dlUrl = '/api/proxy_image?url=' + encodeURIComponent(src);
           const resp = await fetch(dlUrl);
           if(!resp.ok) continue;
           const blob = await resp.blob();
-          const ext = (src.match(/\\.(jpg|jpeg|png|webp)/i) || ['jpg'])[1];
+          const ext = (src.match(/\.(jpg|jpeg|png|webp)/i) || ['jpg'])[1];
           const fileName = 'image_' + String(i+1).padStart(2,'0') + '.' + ext;
           const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
           const writable = await fileHandle.createWritable();
@@ -1430,22 +1461,20 @@ async function downloadAllImages(){
       toast('已保存 ' + success + ' 张图片到所选文件夹');
       return;
     }catch(e){
-      // 用户取消选择目录或其他错误，回退到逐个下载
       if(e.name === 'AbortError'){ btn.disabled=false; btn.innerHTML=origText; return; }
     }
   }
 
-  // 回退方案：逐个下载（浏览器会保存到默认下载目录）
   let success = 0;
-  for(let i = 0; i < currentImages.length; i++){
-    btn.innerHTML = '<span class="spinner"></span> 下载中 ' + (i+1) + '/' + currentImages.length;
+  for(let i = 0; i < urls.length; i++){
+    btn.innerHTML = '<span class="spinner"></span> 下载中 ' + (i+1) + '/' + urls.length;
     try{
-      const src = currentImages[i];
+      const src = urls[i];
       const dlUrl = '/api/proxy_image?url=' + encodeURIComponent(src);
       const resp = await fetch(dlUrl);
       if(!resp.ok) continue;
       const blob = await resp.blob();
-      const ext = (src.match(/\\.(jpg|jpeg|png|webp)/i) || ['jpg'])[1];
+      const ext = (src.match(/\.(jpg|jpeg|png|webp)/i) || ['jpg'])[1];
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = 'image_' + String(i+1).padStart(2,'0') + '.' + ext;
@@ -1460,6 +1489,11 @@ async function downloadAllImages(){
   btn.disabled = false;
   btn.innerHTML = origText;
   toast('已下载 ' + success + ' 张图片');
+}
+
+async function downloadSelectedImages(){
+  const urls = getSelectedImages();
+  await downloadImageList(urls, document.getElementById('dlSelBtn'));
 }
 
 async function downloadVideo(m3u8, btn){
