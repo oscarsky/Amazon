@@ -228,12 +228,19 @@ function parseBrand($) {
   ];
   let brand = parseDetailRow($, brandKeywords);
   if (brand) return brand;
-  // 兜底：byline / 品牌旗舰店链接（取店铺名作为最后的兜底）
+  // 兜底：byline / 品牌旗舰店链接（从"访问 X 品牌旗舰店"里提取 X）
   const a = $('a#bylineInfo, a[href*="/stores/"]').first();
   if (a.length) {
     const txt = a.text().trim();
-    const m = txt.match(/造訪\s*(.+?)\s*品牌/);
-    if (m) return cleanText(m[1]);
+    // 匹配各种形态：造訪 X 品牌旗舰店 / 访问 X 品牌旗舰店 / Visit the X Store / X Storefront
+    const m1 = txt.match(/(?:造訪|访问|Visit)\s*(?:the\s*)?([^\s品牌旗]{1,50})\s*(?:品牌)?旗舰店?/i);
+    if (m1) return cleanText(m1[1]);
+    const m2 = txt.match(/(?:Visit|访问)\s*(?:the\s*)?([^\s]+?)\s*(?:Store|旗舰店)/i);
+    if (m2) return cleanText(m2[1]);
+    // href 里 /stores/BrandName/... 提取品牌名
+    const href = a.attr('href') || '';
+    const hm = href.match(/\/stores\/([^/?]+)/i);
+    if (hm) return cleanText(hm[1].replace(/-/g, ' '));
     if (txt && txt.length < 60) return cleanText(txt);
   }
   return null;
@@ -389,25 +396,42 @@ function extractJsonArray(html, key) {
 }
 
 /**
- * 从页面 HTML 中解析 colorImages，返回变体名称 -> 高清图片URL数组 的映射
- * 每个变体可能有多张图，全部收集（hiRes 优先，large 兜底）
+ * 从页面 HTML 中解析 colorImages，返回变体名称 -> 图片条目数组 的映射
+ * Amazon 近期结构：colorImages = { 'initial': A.$.parseJSON('[...]'), [otherKey]: A.$.parseJSON('[...]'), ... }
+ * 每个变体可能有多张图，每个条目带 hiRes / large / physicalIdForMedia / variant(PTxx) 等字段
  */
 function parseColorImages(html) {
-  const map = {};
-  // 尝试多种键名格式
-  let colorImages = extractJsonObject(html, '"colorImages":') || extractJsonObject(html, "'colorImages':") || extractJsonObject(html, 'colorImages:');
-  if (!colorImages) return map;
-  for (const [variantName, imgs] of Object.entries(colorImages)) {
-    if (!Array.isArray(imgs)) continue;
-    const urls = [];
-    for (const img of imgs) {
-      if (!img) continue;
-      if (img.hiRes) urls.push(img.hiRes);
-      else if (img.large) urls.push(img.large);
+  const result = {};
+  // 1) 先找到 colorImages 的外层 { ... } 边界（用平衡大括号 + 字符串感知）
+  const startIdx = html.search(/['"]colorImages['"]\s*:\s*\{/);
+  if (startIdx < 0) return result;
+  let i = html.indexOf('{', startIdx);
+  if (i < 0) return result;
+  let depth = 0, inStr = null, esc = false, close = -1;
+  for (; i < html.length; i++) {
+    const c = html[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === inStr) inStr = null;
+    } else {
+      if (c === '"' || c === "'") inStr = c;
+      else if (c === '{') depth++;
+      else if (c === '}') { depth--; if (depth === 0) { close = i; break; } }
     }
-    if (urls.length) map[variantName] = urls;
   }
-  return map;
+  if (close < 0) return result;
+  const objSrc = html.slice(startIdx, close + 1);
+  // 2) 遍历每个 key -> A.$.parseJSON('...') 调用，用单引号内部不含转义作为边界
+  const re = /(['"])([^'"]+)\1\s*:\s*A\.\$\.parseJSON\('([^']*?)'\)/g;
+  let m;
+  while ((m = re.exec(objSrc)) !== null) {
+    const key = m[2].trim();
+    let arr;
+    try { arr = JSON.parse(m[3]); } catch (e) { continue; }
+    if (Array.isArray(arr)) result[key] = arr;
+  }
+  return result;
 }
 
 /**
@@ -790,37 +814,59 @@ async function scrape(productUrl) {
   const images = galleryImgs;
   const fallbackImg = (images && images[0]) ? images[0] : '';
 
-  // 其他SKU：colorImages 的 key 就是页面"尺寸规格"选择器的完整权威列表
-  // 直接用 colorImages 生成变体，再用 swatch DOM 过滤 — 只保留"有推荐报价"（swatchAvailable）的 SKU
-  // DOM 里 swatch 每个 li 带 data-csa-c-content-id，值为：
-  //   - twister-desktop-twister-swatch-swatchAvailable （有推荐报价）
-  //   - twister-desktop-twister-swatch-swatchCurrentlyUnavailable / swatchUnavailable（无推荐报价，灰色不可点）
+  // 其他SKU：从 swatch DOM 拿变体名（有推荐报价 = swatchAvailable）+ colorImages.initial 里的 PT→hiRes 映射
+  // 老页面可能还有 colorImages 的二级 key（key 就是变体名），也一起兼容
   let variants = [];
-  if (Object.keys(colorImages).length > 0) {
-    // 扫描 swatch DOM，收集"有推荐报价"的变体名字
-    const availableNames = new Set();
-    $('li[data-csa-c-content-id*="swatchAvailable"], li[data-csa-c-content-id*="swatchCurrentlyUnavailable"]').each((_, el) => {
+  const ciKeys = Object.keys(colorImages).filter(k => k !== 'initial' && k !== 'videos');
+  if (ciKeys.length > 0) {
+    // 老形态：colorImages 有二级 key（key 即变体名）
+    for (const k of ciKeys) {
+      const arr = colorImages[k];
+      variants.push({ name: k, image: arr && arr[0] && (arr[0].hiRes || arr[0].large) || fallbackImg });
+    }
+  } else {
+    // 新形态：colorImages 只有 initial（variants 藏在 initial 的 variant 字段里，如 PT02 / PT03 ...）
+    // 需要结合 swatch DOM（拿可读文本名）+ thumbnailIndex（跟 PT 编号对齐）
+    const initial = colorImages.initial || [];
+    const pt2img = {}; // PTxx -> hiRes URL
+    for (const it of initial) {
+      const v = it && it.variant;
+      if (v && v !== 'MAIN' && it.hiRes) pt2img[v] = it.hiRes;
+    }
+    // idx -> PT 映射：从 variant-PTxx class + thumbnailIndex 提取（两种顺序都兼容）
+    const rawHTML = $.html();
+    const idx2PT = {};
+    let rm;
+    const re1 = /variant-(PT[0-9]+)[^}]*?thumbnailIndex["']?\s*:\s*(\d+)/g;
+    while ((rm = re1.exec(rawHTML)) !== null) idx2PT[parseInt(rm[2], 10)] = rm[1];
+    const re2 = /thumbnailIndex["']?\s*:\s*(\d+)[^}]*?variant["']?\s*:\s*["'](PT[0-9]+)["']/g;
+    while ((rm = re2.exec(rawHTML)) !== null) idx2PT[parseInt(rm[1], 10)] = rm[2];
+    // 扫描 swatch DOM 拿可读变体名
+    $('li[data-csa-c-content-id*="swatch"]').each((_, el) => {
       const $li = $(el);
       const cid = ($li.attr('data-csa-c-content-id') || '').toLowerCase();
       const isAvailable = cid.includes('swatchavailable') && !cid.includes('currentlyunavailable');
       if (!isAvailable) return;
-      // 取按钮里的文字作为变体名
       const txt = cleanText($li.find('.swatch-title-text-display, .a-button-text').first().text());
-      if (txt) availableNames.add(txt);
+      if (!txt) return;
+      const idxStr = $li.attr('data-idxintoggleswatchlist');
+      const idx = idxStr != null ? parseInt(idxStr, 10) : null;
+      // 匹配 hiRes：先 idx2PT 精确，再按 PT0x = idx+1 顺序兜底
+      let hiRes = null;
+      if (idx != null) {
+        if (idx2PT[idx] && pt2img[idx2PT[idx]]) hiRes = pt2img[idx2PT[idx]];
+        else {
+          const ptFallback = 'PT' + String(idx + 1).padStart(2, '0');
+          if (pt2img[ptFallback]) hiRes = pt2img[ptFallback];
+        }
+      }
+      variants.push({ name: txt, image: hiRes || fallbackImg });
     });
-
-    // 如果有 swatch 可用列表，则 colorImages 里只保留匹配的；否则全部保留（无推荐报价标记时）
-    for (const [variantName, urls] of Object.entries(colorImages)) {
-      if (variantName === 'initial') continue;
-      // 过滤掉没有推荐报价的 — 只有当 swatch 列表非空时才做过滤
-      if (availableNames.size > 0 && !availableNames.has(variantName)) continue;
-      const img = (urls && urls[0]) || fallbackImg;
-      variants.push({ name: variantName, image: img });
+    // 最后兜底：swatch DOM 也没找到时用 parseVariants
+    if (variants.length === 0) {
+      variants = parseVariants($);
+      variants.forEach(v => { if (!v.image) v.image = fallbackImg; });
     }
-  } else {
-    // 兜底：colorImages 不可用时才回退到 DOM 扫描
-    variants = parseVariants($);
-    variants.forEach(v => { if (!v.image) v.image = fallbackImg; });
   }
 
   // 等待视频预转换完成（已经在后台并行跑了，几乎无额外延迟）
