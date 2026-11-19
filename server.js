@@ -1391,7 +1391,7 @@ const INDEX_HTML = `<!DOCTYPE html>
   <!-- 尺寸选择（亚马逊风格方框，hover/点击切换主图） -->
   <div class="card">
     <div class="media-header">
-      <div class="field-label">其他尺寸</div>
+      <div class="field-label">其他尺寸 <label style="margin-left:12px;font-weight:normal;color:#aaa;font-size:12px;cursor:pointer"><input type="checkbox" id="selAllSku" checked onchange="toggleSelAllSku(this.checked)" style="margin-right:4px">全选 / 全不选</label></div>
     </div>
     <div class="sku-grid placeholder" id="fSkuImages">等待采集...</div>
   </div>
@@ -1762,6 +1762,11 @@ function toggleSelAll(checked){
   const cb = document.getElementById('selAll'); if(cb) cb.checked = checked;
   updateSelBtn();
 }
+function toggleSelAllSku(checked){
+  document.querySelectorAll('.sku-img-sel').forEach(c => c.checked = checked);
+  const cb = document.getElementById('selAllSku'); if(cb) cb.checked = checked;
+  updateSelBtn();
+}
 function updateSelBtn(){
   const mainAll = document.querySelectorAll('.img-sel').length;
   const mainSel = document.querySelectorAll('.img-sel:checked').length;
@@ -1773,6 +1778,8 @@ function updateSelBtn(){
   btn.textContent = '⬇ 下载选中 (' + (mainSel + skuSel) + ')';
   const selAll = document.getElementById('selAll');
   if(selAll && mainAll > 0) selAll.checked = mainSel === mainAll;
+  const selAllSku = document.getElementById('selAllSku');
+  if(selAllSku && skuAll > 0) selAllSku.checked = skuSel === skuAll;
 }
 
 // 通用下载一组图片（抽取 downloadAllImages 逻辑）
