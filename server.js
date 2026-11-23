@@ -64,6 +64,28 @@ function cleanText(text) {
     .trim();
 }
 
+// 复用亚马逊会话 cookie（session-id 等）。裸语言 cookie 没有会话容易被判异常。
+let amazonSession = { ck: '', at: 0 };
+async function getAmazonSession() {
+  if (amazonSession.ck && Date.now() - amazonSession.at < 5 * 60 * 1000) return amazonSession.ck;
+  try {
+    // /gp/cart/view.html 是轻量端点，会下发 session-id / i18n-prefs / lc-main
+    const r = await axios.get('https://www.amazon.com/gp/cart/view.html', {
+      headers: buildHeaders(),
+      timeout: 6000,
+      decompress: true,
+    });
+    const ck = (r.headers['set-cookie'] || [])
+      .map(c => c.split(';')[0])
+      .filter(p => !/^(lc-main|i18n-prefs)=/i.test(p))
+      .join('; ');
+    if (ck) amazonSession = { ck, at: Date.now() };
+    return ck;
+  } catch (e) {
+    return '';
+  }
+}
+
 /**
  * 抓取亚马逊商品页面（直接获取源码，不走验证流程）
  */
@@ -76,55 +98,46 @@ async function fetchAmazon(productUrl) {
   const cleanUrl = parsed.toString();
 
   let lastErr = null;
-  for (let attempt = 0; attempt < 5; attempt++) {
+  let fallbackBody = null; // 非中文但有效的商品页（最后兜底，交给上层翻译）
+  // 语言/币种 cookie：不携带会拿到英文 UI + 美元价
+  const LOCALE_COOKIE = 'lc-main=zh_CN; i18n-prefs=CNY';
+  // 平台网关 30s 超时：3 次尝试 × 7s + 退避，控制在 ~23s 内
+  let sessionCk = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const headers = buildHeaders();
-      const instance = axios.create({
+      headers['Referer'] = 'https://www.amazon.com/-/zh/';
+      if (attempt === 0) {
+        // 会话 cookie + 语言 cookie（实测最稳：不带 session-id 的裸 cookie 容易被判异常）
+        if (sessionCk === null) sessionCk = await getAmazonSession();
+        headers['Cookie'] = sessionCk ? LOCALE_COOKIE + '; ' + sessionCk : LOCALE_COOKIE;
+      } else if (attempt === 1) {
+        headers['Cookie'] = LOCALE_COOKIE;
+      } // attempt 2: 不带 cookie
+
+      const r = await axios.get(cleanUrl, {
         headers,
         maxRedirects: 5,
-        timeout: 30000,
+        timeout: 7000,
         decompress: true,
-        withCredentials: true,
       });
+      const body = typeof r.data === 'string' ? r.data : '';
 
-      // 预热：访问「中文」主页获取 zh_CN/CNY cookie。
-      // 注意：不能预热英文主页 https://www.amazon.com/ ——实测会返回空 cookie，
-      // 后续商品页直接 302 到验证码页（表现为 status=200 但内容不可用）。
-      let cookieHeader = '';
-      try {
-        const warmup = await instance.get('https://www.amazon.com/-/zh/', { timeout: 15000 });
-        const setCookies = warmup.headers['set-cookie'];
-        if (Array.isArray(setCookies) && setCookies.length) {
-          cookieHeader = setCookies.map(c => c.split(';')[0]).join('; ');
-        }
-        await new Promise(r => setTimeout(r, 800 + attempt * 400));
-      } catch (e) { /* ignore warmup failure */ }
+      const isCaptcha = !body || body.includes('validateCaptcha') || body.includes('Type the characters');
+      const isProduct = /id="productTitle"/.test(body);
+      const isZh = /[\u4e00-\u9fa5]{2,}/.test(body);
 
-      const isBad = (resp) => {
-        const body = typeof resp.data === 'string' ? resp.data : '';
-        return !(resp.status === 200 && body && !body.includes('validateCaptcha') && !body.includes('Type the characters'));
-      };
-
-      const prodHeaders = { ...headers };
-      prodHeaders['Referer'] = 'https://www.amazon.com/-/zh/';
-      if (cookieHeader) prodHeaders['Cookie'] = cookieHeader;
-
-      let r = await instance.get(cleanUrl, { headers: prodHeaders });
-
-      // 验证码兜底：不带 cookie 的全新会话再试一次
-      if (isBad(r)) {
-        const freshHeaders = { ...headers };
-        freshHeaders['Referer'] = 'https://www.amazon.com/-/zh/';
-        r = await instance.get(cleanUrl, { headers: freshHeaders });
+      if (r.status === 200 && !isCaptcha && isProduct) {
+        if (isZh) return body;          // 中文页：直接用
+        fallbackBody = body;            // 英文页：记下来，交给上层翻译
       }
-
-      if (!isBad(r)) return r.data;
-      lastErr = `status=${r.status}`;
+      lastErr = r.status === 200 ? (isCaptcha ? 'captcha' : 'non-product') : `status=${r.status}`;
     } catch (e) {
       lastErr = e.message;
     }
-    await new Promise(r => setTimeout(r, 1200 + attempt * 800));
+    await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
   }
+  if (fallbackBody) return fallbackBody;
   throw new Error(`请求失败（${lastErr}），请稍后重试`);
 }
 
@@ -638,6 +651,63 @@ function parseVariants($) {
 }
 
 /**
+ * 把英文文本翻译成中文（用于亚马逊未提供中文翻译的商品）
+ * 主用 MyMemory 免费接口，Google 兜底；失败则原样返回
+ */
+async function translateChunk(chunk) {
+  try {
+    const r = await axios.get('https://api.mymemory.translated.net/get', {
+      params: { q: chunk, langpair: 'en|zh-CN' },
+      timeout: 6000,
+    });
+    const t = r.data && r.data.responseData && r.data.responseData.translatedText;
+    if (t && !/MYMEMORY WARNING|QUERY LENGTH LIMIT|INVALID/i.test(t)) return t;
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+async function translateToZh(text) {
+  if (!text) return text;
+  const s = String(text);
+  if (/[\u4e00-\u9fa5]/.test(s)) return text;
+
+  // MyMemory 单次约 500 字符上限，按句子/空格切块
+  const parts = [];
+  let rest = s;
+  while (rest.length > 450) {
+    let cut = rest.lastIndexOf('. ', 450);
+    if (cut < 200) cut = rest.lastIndexOf(' ', 450);
+    if (cut < 1) cut = 450;
+    parts.push(rest.slice(0, cut + 1));
+    rest = rest.slice(cut + 1);
+  }
+  if (rest) parts.push(rest);
+
+  try {
+    const out = [];
+    for (const p of parts) {
+      const t = await translateChunk(p);
+      if (!t) throw new Error('chunk failed');
+      out.push(t);
+    }
+    const joined = out.join('').trim();
+    if (/[\u4e00-\u9fa5]/.test(joined)) return joined;
+  } catch (e) { /* fall through to google */ }
+
+  try {
+    const r = await axios.get('https://translate.googleapis.com/translate_a/single', {
+      params: { client: 'gtx', sl: 'auto', tl: 'zh-CN', dt: 't', q: s.slice(0, 4500) },
+      timeout: 5000,
+    });
+    if (Array.isArray(r.data) && Array.isArray(r.data[0])) {
+      const o = r.data[0].map(x => (x && x[0]) || '').join('');
+      if (/[\u4e00-\u9fa5]/.test(o)) return o;
+    }
+  } catch (e) { /* ignore */ }
+  return text;
+}
+
+/**
  * 解析价格详情：总价（含配送费+进口费）、单价、配送费、进口费
  * 优先取"总计"对应的价格
  */
@@ -651,15 +721,15 @@ function parsePriceDetail($) {
     if (v && /\d/.test(v)) total = v;
   }
 
-  // 方法2: 通过"總計/总计"等标签所在行找价格
-  // 价格可能是 .a-offscreen（主价格），也可能是 tr 里同 row 下的任何 CNY/¥ 文本（如总计行）
+  // 方法2: 通过"總計/总计/Total"等标签所在行找价格
+  // 价格可能是 .a-offscreen（主价格），也可能是 tr 里同 row 下的任何 CNY/¥/$ 文本（如总计行）
   $('.a-color-secondary').each((_, el) => {
     const label = cleanText($(el).text());
     let key = null;
-    if (/總計|总计/.test(label)) key = 'total';
-    else if (/^價格$|^价格$/.test(label)) key = 'unit';
-    else if (/配送/.test(label)) key = 'shipping';
-    else if (/進口費用|进口费用|進口費|进口费/.test(label)) key = 'importFee';
+    if (/總計|总计|^Total$/i.test(label)) key = 'total';
+    else if (/^價格$|^价格$|^Price$/i.test(label)) key = 'unit';
+    else if (/配送|^Shipping/i.test(label)) key = 'shipping';
+    else if (/進口費用|进口费用|進口費|进口费|^Import/i.test(label)) key = 'importFee';
 
     if (key) {
       const $row = $(el).closest('.a-row, tr');
@@ -755,27 +825,27 @@ const variantImgCache = new Map();
 async function fetchVariantMainImage(asin) {
   if (variantImgCache.has(asin)) return variantImgCache.get(asin);
   let result = null;
-  for (let attempt = 0; attempt < 2 && !result; attempt++) {
-    try {
-      const headers = buildHeaders();
-      headers['Referer'] = 'https://www.amazon.com/';
-      const r = await axios.get('https://www.amazon.com/dp/' + asin, {
-        headers, timeout: 15000, maxRedirects: 5, decompress: true,
-      });
-      const data = typeof r.data === 'string' ? r.data : '';
-      if (data && !data.includes('validateCaptcha')) {
-        const m = data.match(/"hiRes":"(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/);
-        if (m) result = m[1];
-      }
-    } catch (e) { /* ignore */ }
-  }
+  try {
+    const headers = buildHeaders();
+    headers['Referer'] = 'https://www.amazon.com/';
+    const ck = await getAmazonSession();
+    headers['Cookie'] = ck ? 'lc-main=zh_CN; i18n-prefs=CNY; ' + ck : 'lc-main=zh_CN; i18n-prefs=CNY';
+    const r = await axios.get('https://www.amazon.com/dp/' + asin, {
+      headers, timeout: 7000, maxRedirects: 5, decompress: true,
+    });
+    const data = typeof r.data === 'string' ? r.data : '';
+    if (data && !data.includes('validateCaptcha')) {
+      const m = data.match(/"hiRes":"(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/);
+      if (m) result = m[1];
+    }
+  } catch (e) { /* ignore */ }
   if (variantImgCache.size > 300) variantImgCache.clear();
   variantImgCache.set(asin, result);
   return result;
 }
 
 /**
- * 并行获取多个变体 ASIN 的主图（最多 4 并发）
+ * 并行获取多个变体 ASIN 的主图（最多 4 并发，整体 8s 上限）
  */
 async function fetchVariantMainImages(asins) {
   const uniq = [...new Set(asins.filter(Boolean))];
@@ -788,7 +858,8 @@ async function fetchVariantMainImages(asins) {
       out[asin] = await fetchVariantMainImage(asin);
     }
   }
-  await Promise.all(Array.from({ length: Math.min(4, uniq.length) }, worker));
+  const job = Promise.all(Array.from({ length: Math.min(4, uniq.length) }, worker));
+  await Promise.race([job, new Promise(r => setTimeout(r, 8000))]);
   return out;
 }
 
@@ -800,11 +871,11 @@ async function scrape(productUrl) {
   const $ = cheerio.load(html);
 
   const titleEl = $('#productTitle');
-  const title = cleanText(t2s(titleEl.text().trim()));
+  let title = cleanText(t2s(titleEl.text().trim()));
 
   const priceDetail = parsePriceDetail($);
 
-  const bullets = [];
+  let bullets = [];
   $('#feature-bullets li span').each((_, el) => {
     const txt = cleanText(t2s($(el).text().trim()));
     if (txt && !txt.startsWith('查看')) bullets.push(txt);
@@ -1030,7 +1101,25 @@ async function scrape(productUrl) {
     }
   }
 
-  return { title, price: priceDetail.total, priceDetail, bullets, images, video: videoResult, brand, dimensions, variants, url: productUrl, _debug: { galleryInCount: initial.length, galleryFinal: galleryImgs.length, variantCount: variants.length } };
+  // 亚马逊未提供中文翻译（返回英文页）时，自行翻译标题与五点描述
+  let translated = false;
+  if (title && !/[\u4e00-\u9fa5]/.test(title)) {
+    try {
+      const job = (async () => {
+        const zhTitle = await translateToZh(title);
+        const zhBullets = await Promise.all(bullets.map(b => translateToZh(b)));
+        return { zhTitle, zhBullets };
+      })();
+      const res = await Promise.race([job, new Promise(r => setTimeout(() => r(null), 6000))]);
+      if (res && res.zhTitle && /[\u4e00-\u9fa5]/.test(res.zhTitle)) {
+        title = res.zhTitle;
+        bullets = res.zhBullets;
+        translated = true;
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  return { title, price: priceDetail.total, priceDetail, bullets, images, video: videoResult, brand, dimensions, variants, url: productUrl, _debug: { galleryInCount: initial.length, galleryFinal: galleryImgs.length, variantCount: variants.length, translated } };
 }
 
 // ==================== 路由 ====================
@@ -1051,6 +1140,8 @@ app.post('/api/scrape', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+
 
 // 临时调试接口：检查页面图片数据结构
 app.post('/api/debug-images', async (req, res) => {
