@@ -87,10 +87,12 @@ async function fetchAmazon(productUrl) {
         withCredentials: true,
       });
 
-      // 预热：访问主页获取 cookie
+      // 预热：访问「中文」主页获取 zh_CN/CNY cookie。
+      // 注意：不能预热英文主页 https://www.amazon.com/ ——实测会返回空 cookie，
+      // 后续商品页直接 302 到验证码页（表现为 status=200 但内容不可用）。
       let cookieHeader = '';
       try {
-        const warmup = await instance.get('https://www.amazon.com/', { timeout: 12000 });
+        const warmup = await instance.get('https://www.amazon.com/-/zh/', { timeout: 15000 });
         const setCookies = warmup.headers['set-cookie'];
         if (Array.isArray(setCookies) && setCookies.length) {
           cookieHeader = setCookies.map(c => c.split(';')[0]).join('; ');
@@ -98,13 +100,25 @@ async function fetchAmazon(productUrl) {
         await new Promise(r => setTimeout(r, 800 + attempt * 400));
       } catch (e) { /* ignore warmup failure */ }
 
+      const isBad = (resp) => {
+        const body = typeof resp.data === 'string' ? resp.data : '';
+        return !(resp.status === 200 && body && !body.includes('validateCaptcha') && !body.includes('Type the characters'));
+      };
+
       const prodHeaders = { ...headers };
-      prodHeaders['Referer'] = 'https://www.amazon.com/';
+      prodHeaders['Referer'] = 'https://www.amazon.com/-/zh/';
       if (cookieHeader) prodHeaders['Cookie'] = cookieHeader;
-      const r = await instance.get(cleanUrl, { headers: prodHeaders });
-      if (r.status === 200 && !r.data.includes('validateCaptcha') && !r.data.includes('Type the characters')) {
-        return r.data;
+
+      let r = await instance.get(cleanUrl, { headers: prodHeaders });
+
+      // 验证码兜底：不带 cookie 的全新会话再试一次
+      if (isBad(r)) {
+        const freshHeaders = { ...headers };
+        freshHeaders['Referer'] = 'https://www.amazon.com/-/zh/';
+        r = await instance.get(cleanUrl, { headers: freshHeaders });
       }
+
+      if (!isBad(r)) return r.data;
       lastErr = `status=${r.status}`;
     } catch (e) {
       lastErr = e.message;
