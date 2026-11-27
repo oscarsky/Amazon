@@ -101,9 +101,11 @@ async function fetchAmazon(productUrl) {
   let fallbackBody = null; // 非中文但有效的商品页（最后兜底，交给上层翻译）
   // 语言/币种 cookie：不携带会拿到英文 UI + 美元价
   const LOCALE_COOKIE = 'lc-main=zh_CN; i18n-prefs=CNY';
-  // 平台网关 30s 超时：3 次尝试 × 7s + 退避，控制在 ~23s 内
+  // 平台网关 30s 超时：抓取阶段最多用 16s，剩余留给变体图与翻译
+  const fetchDeadline = Date.now() + 16000;
   let sessionCk = null;
   for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0 && Date.now() > fetchDeadline) break;
     try {
       const headers = buildHeaders();
       headers['Referer'] = 'https://www.amazon.com/-/zh/';
@@ -118,7 +120,7 @@ async function fetchAmazon(productUrl) {
       const r = await axios.get(cleanUrl, {
         headers,
         maxRedirects: 5,
-        timeout: 7000,
+        timeout: 6000,
         decompress: true,
       });
       const body = typeof r.data === 'string' ? r.data : '';
@@ -808,15 +810,20 @@ function parseTwisterDims(html) {
 }
 
 /**
- * 从多个变体维度中挑出"尺寸类"维度（size_name / capacity / weight ...）
+ * 从多个变体维度中挑出需要展示的维度（尺寸类 + 风味类）
+ * 顺序：尺寸 → 风味 → 其他（排除颜色/图案/样式等）
  */
-function pickSizeDimKey(dims) {
+function pickVariantDimKeys(dims) {
   const keys = Object.keys(dims).filter(k => Array.isArray(dims[k]) && dims[k].length);
   const SIZE = /size|capacity|weight|volume|count|quantity|number/i;
-  const BAD = /color|colour|pattern|style|flavor|flavour|scent|taste|configuration/i;
-  return keys.find(k => SIZE.test(k) && !BAD.test(k))
-      || keys.find(k => !BAD.test(k))
-      || null;
+  const FLAVOR = /flavor|flavour|scent|taste|口味|风味/i;
+  const BAD = /color|colour|pattern|style|configuration/i;
+  const out = [];
+  const push = (k) => { if (k && !out.includes(k)) out.push(k); };
+  push(keys.find(k => SIZE.test(k) && !BAD.test(k)));
+  push(keys.find(k => FLAVOR.test(k) && !BAD.test(k)));
+  if (!out.length) push(keys.find(k => !BAD.test(k)));
+  return out;
 }
 
 // 变体 ASIN -> 主图 URL 缓存（避免重复请求同一变体页）
@@ -831,7 +838,7 @@ async function fetchVariantMainImage(asin) {
     const ck = await getAmazonSession();
     headers['Cookie'] = ck ? 'lc-main=zh_CN; i18n-prefs=CNY; ' + ck : 'lc-main=zh_CN; i18n-prefs=CNY';
     const r = await axios.get('https://www.amazon.com/dp/' + asin, {
-      headers, timeout: 7000, maxRedirects: 5, decompress: true,
+      headers, timeout: 6000, maxRedirects: 5, decompress: true,
     });
     const data = typeof r.data === 'string' ? r.data : '';
     if (data && !data.includes('validateCaptcha')) {
@@ -847,7 +854,7 @@ async function fetchVariantMainImage(asin) {
 /**
  * 并行获取多个变体 ASIN 的主图（最多 4 并发，整体 8s 上限）
  */
-async function fetchVariantMainImages(asins) {
+async function fetchVariantMainImages(asins, capMs) {
   const uniq = [...new Set(asins.filter(Boolean))];
   const out = {};
   let cursor = 0;
@@ -858,8 +865,9 @@ async function fetchVariantMainImages(asins) {
       out[asin] = await fetchVariantMainImage(asin);
     }
   }
-  const job = Promise.all(Array.from({ length: Math.min(4, uniq.length) }, worker));
-  await Promise.race([job, new Promise(r => setTimeout(r, 8000))]);
+  const cap = Math.max(1500, Number(capMs) || 7000);
+  const job = Promise.all(Array.from({ length: Math.min(6, uniq.length) }, worker));
+  await Promise.race([job, new Promise(r => setTimeout(r, cap))]);
   return out;
 }
 
@@ -867,6 +875,7 @@ async function fetchVariantMainImages(asins) {
  * 主采集流程
  */
 async function scrape(productUrl) {
+  const DEADLINE = Date.now() + 22000; // 平台网关 30s，留 8s 余量
   const html = await fetchAmazon(productUrl);
   const $ = cheerio.load(html);
 
@@ -930,7 +939,6 @@ async function scrape(productUrl) {
   if (galleryImgs.length === 0) {
     for (const u of parseAllHiResImages(html)) addImg(u);
   }
-  console.log('[DEBUG gallery] final=' + galleryImgs.length);
 
   const images = galleryImgs;
   const fallbackImg = (images && images[0]) ? images[0] : '';
@@ -938,23 +946,32 @@ async function scrape(productUrl) {
   // 其他尺寸（SKU）
   let variants = [];
 
-  // 1) 优先：亚马逊 twister 数据（sortedDimValuesForAllDims）——只取"尺寸类"维度，
-  //    每个尺寸值都带 defaultAsin，该尺寸的真实图片 = 对应 ASIN 商品页主图
+  // 1) 优先：亚马逊 twister 数据（sortedDimValuesForAllDims）——取「尺寸类 + 风味类」维度，
+  //    每个值都带 defaultAsin，其真实图片 = 对应 ASIN 商品页主图
   const twisterDims = parseTwisterDims(html);
-  const sizeDimKey = twisterDims ? pickSizeDimKey(twisterDims) : null;
+  const dimKeys = twisterDims ? pickVariantDimKeys(twisterDims) : [];
   const currentAsin = ((productUrl.match(/\/dp\/([A-Z0-9]{10})/i) || [])[1] || '').toUpperCase();
-  if (sizeDimKey) {
-    const list = (twisterDims[sizeDimKey] || [])
-      .filter(v => v && v.dimensionValueDisplayText && v.dimensionValueState !== 'UNAVAILABLE');
+  if (dimKeys.length) {
+    const seenNames = new Set();
+    const list = [];
+    for (const k of dimKeys) {
+      for (const v of (twisterDims[k] || [])) {
+        if (!v || !v.dimensionValueDisplayText) continue;
+        if (v.dimensionValueState === 'UNAVAILABLE') continue;
+        const name = cleanText(v.dimensionValueDisplayText);
+        if (!name || seenNames.has(name)) continue;
+        seenNames.add(name);
+        list.push({ name, asin: (v.defaultAsin || '').toUpperCase() });
+      }
+    }
     if (list.length) {
-      const needFetch = list
-        .map(v => (v.defaultAsin || '').toUpperCase())
-        .filter(a => a && a !== currentAsin);
-      const imgMap = needFetch.length ? await fetchVariantMainImages(needFetch) : {};
+      const needFetch = list.map(v => v.asin).filter(a => a && a !== currentAsin);
+      // 预留 6s 给后续处理，避免超过平台 30s 网关
+      const capForVariants = Math.max(1500, Math.min(7000, DEADLINE - Date.now() - 6000));
+      const imgMap = needFetch.length ? await fetchVariantMainImages(needFetch, capForVariants) : {};
       for (const v of list) {
-        const asin = (v.defaultAsin || '').toUpperCase();
-        const img = asin === currentAsin ? fallbackImg : (imgMap[asin] || fallbackImg);
-        variants.push({ name: cleanText(v.dimensionValueDisplayText), image: img });
+        const img = v.asin === currentAsin ? fallbackImg : (imgMap[v.asin] || fallbackImg);
+        variants.push({ name: v.name, image: img });
       }
     }
   }
@@ -1110,7 +1127,7 @@ async function scrape(productUrl) {
         const zhBullets = await Promise.all(bullets.map(b => translateToZh(b)));
         return { zhTitle, zhBullets };
       })();
-      const res = await Promise.race([job, new Promise(r => setTimeout(() => r(null), 6000))]);
+      const res = await Promise.race([job, new Promise(r => setTimeout(() => r(null), Math.max(1500, Math.min(4000, DEADLINE - Date.now() - 1500))))]);
       if (res && res.zhTitle && /[\u4e00-\u9fa5]/.test(res.zhTitle)) {
         title = res.zhTitle;
         bullets = res.zhBullets;
